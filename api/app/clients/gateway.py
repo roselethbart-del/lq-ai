@@ -92,10 +92,18 @@ REQUEST_ID_HEADER = "X-Request-Id"
 TIER_RESPONSE_HEADER = "X-LQ-AI-Routed-Inference-Tier"
 """Response header set by the gateway (B4) carrying the routed Inference Tier."""
 
-DEFAULT_TIMEOUT_SECONDS = 60.0
+DEFAULT_TIMEOUT_SECONDS = 130.0
 """Default per-request timeout. Streaming overrides this (the stream is
 expected to take longer than a single API call). Health check overrides
-to a tight value separately."""
+to a tight value separately.
+
+Must exceed the slowest provider adapter timeout on the gateway side
+(``ollama.DEFAULT_TIMEOUT_SECONDS`` = 120s, the largest of the adapters —
+local/remote Ollama cold-starts loading a model into VRAM are the slowest
+path). An outer timeout shorter than an inner one lets this client give up
+while the gateway is still legitimately waiting on the provider, which
+surfaces as a spurious "Gateway did not respond within the configured
+timeout" even though the gateway would have returned a real response."""
 
 
 def _structured_log_extra(**fields: Any) -> dict[str, Any]:
