@@ -157,6 +157,26 @@ export interface ProjectCreate {
 	minimum_inference_tier?: 1 | 2 | 3 | 4 | 5;
 }
 
+/**
+ * PATCH /api/v1/projects/{id} body. Mirrors backend
+ * `ProjectUpdateRequest` (api/app/schemas/projects.py) field-for-field —
+ * that schema uses `extra="forbid"`, so a field name here that doesn't
+ * match the backend (e.g. `archived_at` instead of `archived`) fails
+ * with a 422 "Extra inputs are not permitted". Deliberately distinct
+ * from `Project` (the read model) since e.g. `archived` (write) and
+ * `archived_at` (read) aren't the same field.
+ */
+export interface ProjectUpdate {
+	name?: string;
+	slug?: string;
+	description?: string | null;
+	context_md?: string | null;
+	privileged?: boolean;
+	minimum_inference_tier?: 1 | 2 | 3 | 4 | 5 | null;
+	/** Archive (true) or unarchive (false) the project. */
+	archived?: boolean;
+}
+
 // ----- Chats / messages -----
 
 export interface Chat {

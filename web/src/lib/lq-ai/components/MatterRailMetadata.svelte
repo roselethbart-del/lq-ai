@@ -125,8 +125,7 @@
     archiveError = null;
     archiving = true;
     try {
-      // PATCH archived: true (patchProject accepts Partial<Project>)
-      await projectsApi.patchProject(matter.id, { archived_at: new Date().toISOString() } as Parameters<typeof projectsApi.patchProject>[1]);
+      await projectsApi.archiveProject(matter.id);
       onMatterArchived();
     } catch (e) {
       archiveError = e instanceof Error ? e.message : 'Failed to archive matter.';
