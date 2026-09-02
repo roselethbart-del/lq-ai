@@ -393,6 +393,34 @@
 		}
 	}
 
+	async function renameChat(chat: Chat, newTitle: string) {
+		try {
+			const updated = await chatsApi.patchChat(chat.id, { title: newTitle });
+			chatsStore.update(($chats) => $chats.map((c) => (c.id === updated.id ? updated : c)));
+			if ($activeChatStore?.id === updated.id) {
+				activeChatStore.set(updated);
+			}
+		} catch (e) {
+			console.error('lq-ai: failed to rename chat', e);
+		}
+	}
+
+	async function deleteChat(chat: Chat) {
+		try {
+			await chatsApi.archiveChat(chat.id);
+			// archiveChat is a soft-delete (sets archived_at); drop it from the
+			// active list locally rather than refetching — chatsByProject
+			// already filters archived_at chats out of the default view.
+			chatsStore.update(($chats) => $chats.filter((c) => c.id !== chat.id));
+			if ($activeChatStore?.id === chat.id) {
+				activeChatStore.set(null);
+				messagesStore.set([]);
+			}
+		} catch (e) {
+			console.error('lq-ai: failed to delete chat', e);
+		}
+	}
+
 	function selectProject(project: Project | null) {
 		activeProject = project;
 	}
@@ -1026,6 +1054,8 @@
 		onNewChat={createNewChat}
 		onSelectProject={selectProject}
 		onToggleArchived={toggleArchived}
+		onRenameChat={renameChat}
+		onDeleteChat={deleteChat}
 	/>
 
 	<section class="flex-1 flex flex-col overflow-hidden">

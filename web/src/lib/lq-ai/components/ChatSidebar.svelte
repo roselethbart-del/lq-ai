@@ -10,6 +10,7 @@
 	 *   filters the sidebar to that project's chats.
 	 */
 	import type { Chat, Project } from '../types';
+	import ChatSidebarRow from './ChatSidebarRow.svelte';
 
 	export let groups: Array<{ project: Project | null; chats: Chat[] }> = [];
 	export let activeChatId: string | null = null;
@@ -20,6 +21,8 @@
 	export let onNewChat: () => void = () => undefined;
 	export let onSelectProject: (project: Project | null) => void = () => undefined;
 	export let onToggleArchived: (next: boolean) => void = () => undefined;
+	export let onRenameChat: (chat: Chat, newTitle: string) => void = () => undefined;
+	export let onDeleteChat: (chat: Chat) => void = () => undefined;
 
 	/**
 	 * When true, hides the project-filter UI (the "Projects" label, "All chats"
@@ -90,16 +93,13 @@
 					</button>
 					<ul class="mt-0.5">
 						{#each group.chats as chat (chat.id)}
-							<li>
-								<button
-									type="button"
-									class="lq-chat-row {activeChatId === chat.id ? 'lq-chat-row--active' : ''}"
-									on:click={() => onSelectChat(chat)}
-									data-testid={`lq-ai-chat-${chat.id}`}
-								>
-									{chat.title || 'Untitled chat'}
-								</button>
-							</li>
+							<ChatSidebarRow
+								{chat}
+								active={activeChatId === chat.id}
+								onSelect={onSelectChat}
+								onRename={onRenameChat}
+								onDelete={onDeleteChat}
+							/>
 						{/each}
 					</ul>
 				</div>
@@ -114,16 +114,13 @@
 			{#each groups as group (group.project?.id ?? '__no_project__')}
 				<ul class="mt-0.5">
 					{#each group.chats as chat (chat.id)}
-						<li>
-							<button
-								type="button"
-								class="lq-chat-row {activeChatId === chat.id ? 'lq-chat-row--active' : ''}"
-								on:click={() => onSelectChat(chat)}
-								data-testid={`lq-ai-chat-${chat.id}`}
-							>
-								{chat.title || 'Untitled chat'}
-							</button>
-						</li>
+						<ChatSidebarRow
+							{chat}
+							active={activeChatId === chat.id}
+							onSelect={onSelectChat}
+							onRename={onRenameChat}
+							onDelete={onDeleteChat}
+						/>
 					{/each}
 				</ul>
 			{/each}
