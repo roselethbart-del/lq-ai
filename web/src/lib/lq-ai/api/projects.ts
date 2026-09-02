@@ -2,7 +2,7 @@
  * /api/v1/projects — list / create / patch / archive.
  */
 import { apiRequest } from './client';
-import type { Project, ProjectCreate } from '../types';
+import type { Project, ProjectCreate, ProjectUpdate } from '../types';
 
 /**
  * GET /api/v1/projects — list the caller's projects.
@@ -54,7 +54,7 @@ export async function getProject(id: string): Promise<Project> {
 }
 
 /** PATCH /api/v1/projects/{id} */
-export async function patchProject(id: string, body: Partial<Project>): Promise<Project> {
+export async function patchProject(id: string, body: ProjectUpdate): Promise<Project> {
 	return apiRequest<Project>(`/projects/${encodeURIComponent(id)}`, {
 		method: 'PATCH',
 		body
