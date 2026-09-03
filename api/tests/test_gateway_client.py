@@ -1076,6 +1076,28 @@ async def test_list_tool_providers_forwards_request_id(client: GatewayClient) ->
     assert route.calls.last.request.headers.get("X-Request-Id") == "req-abc"
 
 
+def test_default_timeout_exceeds_slowest_provider_adapter_timeout() -> None:
+    """Regression test for the spurious-timeout bug this constant fixes.
+
+    ``DEFAULT_TIMEOUT_SECONDS`` here is the outer (api -> gateway) timeout;
+    the gateway's own Ollama adapter (the slowest of its provider adapters,
+    per ``gateway/app/providers/ollama.py``) allows up to 120s for a
+    cold-start model load. api/ and gateway/ are separate services with no
+    shared import path (per CLAUDE.md), so this can't assert equality
+    against the gateway's constant directly — instead it pins the value and
+    the invariant it must satisfy, so a future edit that lowers this below
+    the gateway's Ollama ceiling fails a test instead of silently
+    reintroducing "Gateway did not respond within the configured timeout"
+    for local/Ollama-backed deployments.
+    """
+
+    from app.clients.gateway import DEFAULT_TIMEOUT_SECONDS
+
+    GATEWAY_OLLAMA_ADAPTER_TIMEOUT_SECONDS = 120.0  # gateway/app/providers/ollama.py
+    assert DEFAULT_TIMEOUT_SECONDS > GATEWAY_OLLAMA_ADAPTER_TIMEOUT_SECONDS
+    assert DEFAULT_TIMEOUT_SECONDS == 130.0
+
+
 # Suppress the "task pending" warning that respx can emit on cancellation.
 @pytest.fixture(autouse=True)
 def _suppress_pending_task_warnings() -> None:
