@@ -10,9 +10,14 @@
  * Coverage:
  *   - deleteConfirmMessage(chat)              → confirm() prompt copy
  *   - resolveRenameCommit(draft, currentTitle) → commit/no-commit decision
+ *   - CHAT_TITLE_MAX_LENGTH                    → matches the backend cap
  */
 import { describe, expect, it } from 'vitest';
-import { deleteConfirmMessage, resolveRenameCommit } from '../components/ChatSidebarRow.svelte';
+import {
+	CHAT_TITLE_MAX_LENGTH,
+	deleteConfirmMessage,
+	resolveRenameCommit
+} from '../components/ChatSidebarRow.svelte';
 import type { Chat } from '../types';
 
 function makeChat(overrides: Partial<Chat> = {}): Chat {
@@ -53,5 +58,15 @@ describe('resolveRenameCommit', () => {
 	it('returns null when the trimmed draft equals the current title (no-op)', () => {
 		expect(resolveRenameCommit('Original', 'Original')).toBeNull();
 		expect(resolveRenameCommit('  Original  ', 'Original')).toBeNull();
+	});
+});
+
+describe('CHAT_TITLE_MAX_LENGTH', () => {
+	it('matches the backend TITLE_MAX_LEN (api/app/schemas/chats.py)', () => {
+		// Regression guard: this bounds the rename <input>'s maxlength so a
+		// title over the backend's cap fails client-side instead of round-
+		// tripping to a silent 422 (the row would otherwise just revert with
+		// no feedback — see ChatPanel.svelte's renameChat error handling).
+		expect(CHAT_TITLE_MAX_LENGTH).toBe(200);
 	});
 });
