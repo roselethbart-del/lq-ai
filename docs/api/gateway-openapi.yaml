@@ -1012,6 +1012,20 @@ components:
         temperature: {type: number, minimum: 0, maximum: 2}
         top_p: {type: number}
         stream: {type: boolean, default: false}
+        think:
+          type: boolean
+          description: |
+            Ollama-only reasoning toggle, forwarded verbatim as Ollama's
+            top-level `think` field. Omitted (the default) leaves each
+            model's own reasoning default in place — ordinary chat
+            traffic never sets this. Internal system callers doing
+            mechanical structured-output extraction (Easy Playbook,
+            Playbook executor, Tabular executor) set `think: false` so a
+            reasoning-capable model (e.g. Qwen3.5) skips its hidden
+            chain-of-thought pass, which otherwise can consume the
+            entire `max_tokens` budget before any usable content is
+            emitted. Providers other than Ollama have no equivalent wire
+            concept and ignore this field.
         # LQ.AI extensions
         minimum_inference_tier:
           type: integer

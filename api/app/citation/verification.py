@@ -305,6 +305,11 @@ async def verify_paraphrase(
         # We don't want creative paraphrases of the verdict; 0.0 keeps
         # the judge deterministic.
         temperature=0.0,
+        think=False,
+        # Structured-JSON verdict, no analysis needed — on an Ollama
+        # reasoning model a hidden chain-of-thought pass can consume the
+        # entire 400-token max_tokens budget before any content is
+        # emitted. No-op on non-Ollama providers.
         # Per-request opt-out from anonymization — the judge needs to
         # see actual content to verify it. Anonymized text would
         # destroy the semantics the judge is checking against.

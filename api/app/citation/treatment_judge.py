@@ -134,6 +134,11 @@ async def judge_treatment(
         messages=build_treatment_judge_prompt(cited_case_name=cited_case_name, snippet=snippet),
         max_tokens=400,
         temperature=0.0,
+        think=False,
+        # Structured-JSON verdict, no analysis needed — on an Ollama
+        # reasoning model a hidden chain-of-thought pass can consume the
+        # entire 400-token max_tokens budget before any content is
+        # emitted. No-op on non-Ollama providers.
         anonymize=False,
         lq_ai_purpose=_TREATMENT_PURPOSE,
     )

@@ -237,6 +237,10 @@ async def test_extract_cell_tags_request_with_tabular_extraction_purpose() -> No
     assert len(gateway.calls_received) == 1
     request = gateway.calls_received[0]
     assert request.lq_ai_purpose == "tabular_extraction"
+    # Structured-JSON output needs no hidden reasoning pass; on an Ollama
+    # reasoning model that pass can otherwise consume the entire
+    # `max_tokens` budget before any content is emitted.
+    assert request.think is False
 
 
 @pytest.mark.unit

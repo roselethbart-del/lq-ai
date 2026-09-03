@@ -166,6 +166,18 @@ class ChatCompletionRequest(BaseModel):
     multiplies cost without a corresponding skill use case (PRD §7).
     """
 
+    think: bool | None = None
+    """Ollama-only reasoning toggle, forwarded verbatim as Ollama's
+    top-level ``think`` field. ``None`` (the default) omits it entirely
+    so a reasoning-capable model (e.g. Qwen3.5) keeps its own default —
+    ordinary chat traffic never sets this. Internal system callers that
+    do mechanical structured-output extraction (Easy Playbook, Playbook
+    executor, Tabular executor) set ``think=False`` so the model skips
+    its hidden chain-of-thought pass, which otherwise can consume the
+    entire ``max_tokens`` budget before any usable output is emitted.
+    Providers other than Ollama have no equivalent wire concept and
+    ignore this field."""
+
     # --- Function/tool calling (PR5b) ---------------------------------------
     tools: list[dict[str, Any]] | None = None
     """OpenAI-style tool/function declarations. Forwarded to the provider

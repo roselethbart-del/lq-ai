@@ -277,6 +277,28 @@ def test_to_ollama_request_max_tokens_becomes_num_predict() -> None:
 
 
 @pytest.mark.unit
+def test_to_ollama_request_think_forwards_as_top_level_field() -> None:
+    """``think`` forwards at the body's top level, NOT under ``options`` —
+    Ollama's ``/api/chat`` contract keeps it separate from sampling
+    params."""
+
+    req = _basic_request(think=False)
+    body = _to_ollama_request(req, model="llama3.1", stream=False)
+    assert body["think"] is False
+    assert "think" not in body.get("options", {})
+
+
+@pytest.mark.unit
+def test_to_ollama_request_think_omitted_when_unset() -> None:
+    """Unset ``think`` (the default for every caller except the internal
+    structured-extraction pipelines) omits the field entirely, so a
+    reasoning model keeps its own default behavior."""
+
+    body = _to_ollama_request(_basic_request(), model="llama3.1", stream=False)
+    assert "think" not in body
+
+
+@pytest.mark.unit
 def test_to_ollama_request_sampling_params_in_options() -> None:
     """``temperature`` / ``top_p`` move into the ``options`` sub-object."""
 

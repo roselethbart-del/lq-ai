@@ -419,6 +419,9 @@ def _to_ollama_request(
     * Sampling parameters move into ``options``: ``num_predict`` (from
       ``max_tokens``), ``temperature``, ``top_p``, and ``stop`` (Ollama
       uses ``stop`` directly, list-only).
+    * ``think`` forwards as a top-level field (not under ``options``)
+      when the caller set it; omitted entirely when unset so each
+      model's own reasoning default applies.
 
     Tool messages (``role: tool``) flow through; Ollama 0.4+ accepts
     them in the ``messages`` array. Tool-call assistant messages (with
@@ -468,6 +471,16 @@ def _to_ollama_request(
         options["stop"] = [request.stop] if isinstance(request.stop, str) else list(request.stop)
     if options:
         body["options"] = options
+
+    if request.think is not None:
+        # Ollama-only reasoning toggle. Top-level per Ollama's /api/chat
+        # contract — NOT under `options`. A reasoning-capable model (e.g.
+        # Qwen3.5) defaults to thinking-enabled; `think=False` is the only
+        # way to suppress the hidden chain-of-thought pass, which
+        # otherwise can consume the entire `num_predict` budget before
+        # any content is emitted. Models with no reasoning mode ignore an
+        # unrecognized `think` field.
+        body["think"] = request.think
 
     # Tool calls / tool choice forward through ``tools`` per Ollama's
     # 0.4+ tool-use surface. The OpenAI ``tools`` schema maps directly:

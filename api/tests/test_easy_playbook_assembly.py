@@ -416,6 +416,10 @@ async def test_describe_position_request_carries_audit_purpose() -> None:
     # `temperature` is intentionally omitted — Opus 4.x reasoning models
     # rejected it as of 2026-05; the gateway only forwards non-None.
     assert request.temperature is None
+    # Structured-JSON output needs no hidden reasoning pass; on an Ollama
+    # reasoning model that pass can otherwise consume the entire
+    # `max_tokens` budget before any content is emitted.
+    assert request.think is False
 
 
 @pytest.mark.unit
