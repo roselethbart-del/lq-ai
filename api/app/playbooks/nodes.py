@@ -590,6 +590,11 @@ async def _dispatch_structured_call(
         model=model,
         messages=messages,
         max_tokens=max_tokens,
+        think=False,
+        # Structured-JSON output, no analysis needed — a hidden
+        # chain-of-thought pass on an Ollama reasoning model can consume
+        # the whole `max_tokens` budget before any content is emitted.
+        # No-op on non-Ollama providers.
         anonymize=False,
         lq_ai_purpose="playbook_executor",
     )

@@ -77,6 +77,7 @@ async def test_judge_treatment_tags_purpose_and_parses():
             seen["anonymize"] = request.anonymize
             seen["temperature"] = request.temperature
             seen["max_tokens"] = request.max_tokens
+            seen["think"] = request.think
             return _resp(
                 json.dumps(
                     {
@@ -92,3 +93,7 @@ async def test_judge_treatment_tags_purpose_and_parses():
     assert seen["purpose"] == "judge_treatment" and seen["anonymize"] is False
     assert seen["temperature"] == 0.0
     assert seen["max_tokens"] == 400
+    # Structured-JSON verdict, no analysis needed — on an Ollama reasoning
+    # model a hidden chain-of-thought pass can consume the entire
+    # 400-token max_tokens budget before any content is emitted.
+    assert seen["think"] is False

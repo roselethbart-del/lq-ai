@@ -339,6 +339,13 @@ async def _extract_one_span(
         # only forwards non-None values to providers. Determinism for
         # reasoning models is implicit; sampled models keep their
         # provider default.
+        think=False,
+        # This call emits mechanical structured JSON, not analysis — a
+        # hidden chain-of-thought pass buys nothing and, on a Ollama
+        # reasoning model (e.g. Qwen3.5), can consume the entire
+        # EASY_EXTRACT_MAX_TOKENS budget before any content is emitted,
+        # silently yielding zero extracted clauses per span. `think` is
+        # a no-op on non-Ollama providers.
         anonymize=False,
         lq_ai_purpose="playbook_easy_extract",
     )

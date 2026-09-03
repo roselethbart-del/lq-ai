@@ -351,6 +351,10 @@ async def test_dispatches_with_configured_judge_model() -> None:
     roles = [m.role for m in gw.last_request.messages]
     assert "system" in roles
     assert "user" in roles
+    # Structured-JSON verdict, no analysis needed — on an Ollama reasoning
+    # model a hidden chain-of-thought pass can consume the entire
+    # 400-token max_tokens budget before any content is emitted.
+    assert gw.last_request.think is False
 
 
 @pytest.mark.unit

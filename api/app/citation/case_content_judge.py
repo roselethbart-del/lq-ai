@@ -85,6 +85,11 @@ def _build_prompt(passage: str, opinion_text: str, *, judge_model: str) -> ChatC
         max_tokens=400,
         # Deterministic — no creative paraphrasing of the verdict.
         temperature=0.0,
+        think=False,
+        # Structured-JSON verdict, no analysis needed — on an Ollama
+        # reasoning model a hidden chain-of-thought pass can consume the
+        # entire 400-token max_tokens budget before any content is
+        # emitted. No-op on non-Ollama providers.
         # The judge must see real content to verify it; anonymization would
         # destroy the semantics it is checking against.
         anonymize=False,

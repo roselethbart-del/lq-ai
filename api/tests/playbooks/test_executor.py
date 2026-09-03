@@ -35,10 +35,12 @@ from app.playbooks.nodes import (
     _coerce_chunk_indices,
     _coerce_confidence,
     _coerce_verdict,
+    _dispatch_structured_call,
     _parse_json_object,
     _shape_results_payload,
     _summarize,
 )
+from app.schemas.gateway import ChatCompletionMessage
 from app.security import hash_password
 
 # ---------------------------------------------------------------------------
@@ -162,6 +164,22 @@ class _StubGateway:
         return _StubResponse(
             choices=[_StubChoice(message=_StubMessage(content=json.dumps(payload)))]
         )
+
+
+@pytest.mark.unit
+async def test_dispatch_structured_call_disables_thinking() -> None:
+    """Structured-JSON output needs no hidden reasoning pass; on an
+    Ollama reasoning model that pass can otherwise consume the entire
+    `max_tokens` budget before any content is emitted."""
+
+    gateway = _StubGateway(payloads=[{"verdict": "matches_standard"}])
+    await _dispatch_structured_call(
+        gateway=gateway,  # type: ignore[arg-type]
+        model="smart",
+        messages=[ChatCompletionMessage(role="user", content="classify this")],
+        max_tokens=200,
+    )
+    assert gateway.calls_received[0].think is False
 
 
 async def _make_user(db: AsyncSession) -> User:

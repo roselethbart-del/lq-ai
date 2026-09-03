@@ -175,6 +175,10 @@ async def test_prompt_includes_authority_text_and_passage() -> None:
     assert "UNIQUE_PASSAGE" in text
     assert "UNIQUE_AUTHORITY_BODY" in text
     assert gw.last_request.lq_ai_purpose == "judge_authority_content"
+    # Structured-JSON verdict, no analysis needed — on an Ollama reasoning
+    # model a hidden chain-of-thought pass can consume the entire
+    # 400-token max_tokens budget before any content is emitted.
+    assert gw.last_request.think is False
 
 
 # ---------------------------------------------------------------------------

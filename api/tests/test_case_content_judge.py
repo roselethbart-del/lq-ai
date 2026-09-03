@@ -222,6 +222,10 @@ async def test_request_purpose_is_judge_case_content() -> None:
         judge_model="fast",
     )
     assert captured["request"].lq_ai_purpose == "judge_case_content"
+    # Structured-JSON verdict, no analysis needed — on an Ollama reasoning
+    # model a hidden chain-of-thought pass can consume the entire
+    # 400-token max_tokens budget before any content is emitted.
+    assert captured["request"].think is False
 
 
 # ---------------------------------------------------------------------------

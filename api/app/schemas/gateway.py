@@ -118,6 +118,18 @@ class ChatCompletionRequest(BaseModel):
     gateway, which forwards to the provider."""
     tool_choice: str | dict[str, Any] | None = None
 
+    think: bool | None = None
+    """Ollama-only reasoning toggle, forwarded verbatim to the gateway
+    and on to Ollama's top-level ``think`` field. ``None`` (the default)
+    omits it entirely so a reasoning-capable model (e.g. Qwen3.5) keeps
+    its own default — ordinary chat traffic never sets this. The Easy
+    Playbook extractor, Playbook executor, and Tabular executor set
+    ``think=False`` on their judge-model calls because their output is
+    mechanical structured JSON with no need for a hidden chain-of-thought
+    pass, which otherwise can consume the entire ``max_tokens`` budget
+    before any usable content is emitted. Providers other than Ollama
+    have no equivalent wire concept and ignore this field."""
+
     # --- LQ.AI extensions (per gateway-openapi.yaml) -------------------------
     minimum_inference_tier: int | None = Field(default=None, ge=1, le=5)
     """D1: per-call request override of the tier floor. Most-restrictive
