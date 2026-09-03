@@ -196,28 +196,6 @@
 		color: var(--lq-accent);
 	}
 
-	.lq-chat-row {
-		display: block;
-		width: 100%;
-		text-align: left;
-		padding: 6px 20px;
-		font-size: 14px;
-		border-radius: 2px;
-		color: var(--lq-text);
-		background: transparent;
-		border: 0;
-		cursor: pointer;
-	}
-	.lq-chat-row:hover {
-		background: var(--lq-accent-soft);
-	}
-	.lq-chat-row--active {
-		background: var(--lq-accent-soft);
-		color: var(--lq-accent);
-		border-left: 2px solid var(--lq-accent);
-		padding-left: 18px;
-	}
-
 	.lq-empty-hint {
 		color: var(--lq-text-tertiary);
 	}

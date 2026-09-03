@@ -11,6 +11,11 @@
 	 */
 	import type { Chat } from '../types';
 
+	/** Mirrors TITLE_MAX_LEN in api/app/schemas/chats.py — the backend
+	 * rejects a longer title with a 422; capping client-side avoids a
+	 * silent round-trip failure. */
+	export const CHAT_TITLE_MAX_LENGTH = 200;
+
 	/** Confirmation copy shown before a delete (native `confirm()`, matching
 	 * SavedPromptsPanel.svelte's delete-confirmation convention). */
 	export function deleteConfirmMessage(chat: Chat): string {
@@ -30,6 +35,8 @@
 </script>
 
 <script lang="ts">
+	import { tick } from 'svelte';
+
 	export let chat: Chat;
 	export let active: boolean = false;
 	export let onSelect: (chat: Chat) => void = () => undefined;
@@ -40,14 +47,13 @@
 	let draftTitle = '';
 	let inputEl: HTMLInputElement | null = null;
 
-	function startRename() {
+	async function startRename() {
 		draftTitle = chat.title || '';
 		editing = true;
-		// Focus after the input mounts.
-		setTimeout(() => {
-			inputEl?.focus();
-			inputEl?.select();
-		}, 0);
+		// Wait for the input to mount, then focus it.
+		await tick();
+		inputEl?.focus();
+		inputEl?.select();
 	}
 
 	function commitRename() {
@@ -88,7 +94,8 @@
 			class="lq-chat-row-input"
 			on:keydown={handleKeydown}
 			on:blur={commitRename}
-			data-testid={`lq-ai-chat-rename-input-${chat.id}`}
+			maxlength={CHAT_TITLE_MAX_LENGTH}
+			data-testid={`lq-ai-chatrow-rename-input-${chat.id}`}
 		/>
 	{:else}
 		<button
@@ -111,7 +118,7 @@
 				title="Rename"
 				aria-label="Rename chat"
 				on:click|stopPropagation={startRename}
-				data-testid={`lq-ai-chat-rename-${chat.id}`}
+				data-testid={`lq-ai-chatrow-rename-${chat.id}`}
 			>
 				<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4">
 					<path
@@ -127,7 +134,7 @@
 				title="Delete"
 				aria-label="Delete chat"
 				on:click|stopPropagation={handleDeleteClick}
-				data-testid={`lq-ai-chat-delete-${chat.id}`}
+				data-testid={`lq-ai-chatrow-delete-${chat.id}`}
 			>
 				<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4">
 					<path
@@ -142,6 +149,28 @@
 </li>
 
 <style>
+	.lq-chat-row {
+		display: block;
+		width: 100%;
+		text-align: left;
+		padding: 6px 20px;
+		font-size: 14px;
+		border-radius: 2px;
+		color: var(--lq-text);
+		background: transparent;
+		border: 0;
+		cursor: pointer;
+	}
+	.lq-chat-row:hover {
+		background: var(--lq-accent-soft);
+	}
+	.lq-chat-row--active {
+		background: var(--lq-accent-soft);
+		color: var(--lq-accent);
+		border-left: 2px solid var(--lq-accent);
+		padding-left: 18px;
+	}
+
 	.lq-chat-item {
 		position: relative;
 	}

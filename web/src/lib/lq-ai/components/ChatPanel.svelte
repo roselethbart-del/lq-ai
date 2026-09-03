@@ -63,6 +63,7 @@
 	import { get } from 'svelte/store';
 	import { onDestroy, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { toast } from 'svelte-sonner';
 
 	import {
 		chatsApi,
@@ -337,6 +338,13 @@
 	}
 
 	async function selectChat(chat: Chat) {
+		// No-op when re-selecting the already-active chat. Without this guard,
+		// a double-click on the active chat's title (the rename gesture) fires
+		// two `click` events before `dblclick` per the DOM spec, and this
+		// function would otherwise wipe the in-progress draft (composer text,
+		// attached skills/files) as a side effect of "reselecting" the chat
+		// the user was already in.
+		if (chat.id === $activeChatStore?.id) return;
 		activeChatStore.set(chat);
 		streamingMessageId = null;
 		sendError = null;
@@ -402,6 +410,7 @@
 			}
 		} catch (e) {
 			console.error('lq-ai: failed to rename chat', e);
+			toast.error(e instanceof Error ? e.message : 'Failed to rename chat.');
 		}
 	}
 
@@ -415,9 +424,15 @@
 			if ($activeChatStore?.id === chat.id) {
 				activeChatStore.set(null);
 				messagesStore.set([]);
+				// Mirror selectChat's per-chat draft cleanup — otherwise a
+				// file-ingestion poll for the just-deleted chat keeps running
+				// against a chat that no longer exists in the active view.
+				abortFilePolls();
+				chatFiles = [];
 			}
 		} catch (e) {
 			console.error('lq-ai: failed to delete chat', e);
+			toast.error(e instanceof Error ? e.message : 'Failed to delete chat.');
 		}
 	}
 
