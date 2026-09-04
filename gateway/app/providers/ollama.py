@@ -99,8 +99,10 @@ from app.providers.openai_schema import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionUsage,
+    EmbeddingObject,
     EmbeddingsRequest,
     EmbeddingsResponse,
+    EmbeddingsUsage,
     FinishReason,
 )
 from app.secrets import ProviderKeyResolver
@@ -259,26 +261,61 @@ class OllamaAdapter(ProviderAdapter):
         *,
         model: str,
     ) -> EmbeddingsResponse:
-        """Ollama has an ``/api/embed`` endpoint; the adapter does not
-        implement it in this revision.
+        """POST to Ollama's ``/api/embed`` and translate the response.
 
-        The KB / RAG layer (C6) routes the ``embedding`` alias to the
-        OpenAI adapter per ADR 0008 (1536-dim matches the
-        ``document_chunks.embedding`` column). When an operator wants
-        local embeddings for Mode 2, the path is: implement
-        ``/api/embed`` here, add a Tier-1 ``embedding-local`` alias in
-        ``gateway.yaml``, and ALTER the embedding column to the
-        Ollama-served model's dimension. That work is documented as a
-        deferred-enhancement entry in M1-PROGRESS; until it lands the
-        method raises :class:`ProviderUnsupportedError` so the
-        embeddings handler's fallback walk picks the next candidate.
+        Closes the Mode-2 (air-gapped) embedding gap ADR 0008 deferred:
+        the ``embedding`` alias can now resolve to a Tier-1 Ollama model
+        instead of requiring an OpenAI key, so a deployment that holds
+        no cloud provider key can still index a knowledge base.
+
+        Dimension is the operator's responsibility. Ollama-served
+        embedding models are typically 768-dim (``nomic-embed-text``,
+        ``embeddinggemma``) or 1024-dim (``bge-m3``, ``qwen3-embedding``)
+        rather than OpenAI's 1536, so ``document_chunks.embedding`` must
+        be sized to match — see ``api/`` settings ``EMBEDDING_DIMENSION``
+        and the accompanying migration. A dimension mismatch surfaces
+        here as an explicit error rather than silently persisting
+        wrong-width vectors.
         """
 
-        raise ProviderUnsupportedError(
-            "Ollama embeddings are not yet wired through the gateway; "
-            "route the 'embedding' alias to the OpenAI adapter or another "
-            "embedding-capable provider (ADR 0008)",
-            details={"provider": self.name, "model": model},
+        if request.encoding_format == "base64":
+            # Ollama only ever returns float arrays. Refusing loudly beats
+            # returning floats to a caller that asked for base64.
+            raise ProviderUnsupportedError(
+                "Ollama embeddings return float arrays; encoding_format='base64' "
+                "is not supported by this provider",
+                details={"provider": self.name, "model": model},
+            )
+
+        ollama_body = _to_ollama_embeddings_request(request, model=model)
+
+        try:
+            response = await self._client.post(
+                "/api/embed",
+                json=ollama_body,
+                headers=self._auth_headers(),
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderNetworkError(
+                f"failed to reach Ollama: {type(exc).__name__}",
+                details={"provider": self.name},
+            ) from exc
+
+        _raise_for_status(response, provider=self.name)
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise ProviderHTTPError(
+                "Ollama returned a non-JSON response",
+                upstream_status=response.status_code,
+                details={"provider": self.name},
+            ) from exc
+
+        return _from_ollama_embeddings_response(
+            payload,
+            requested_model=model,
+            expected_dimensions=request.dimensions,
+            provider=self.name,
         )
 
     async def health_check(self) -> ProviderHealth:
@@ -503,6 +540,98 @@ def _to_ollama_request(
 
 
 # --- Translation: Ollama -> OpenAI (non-streaming) ----------------------------
+
+
+def _to_ollama_embeddings_request(
+    request: EmbeddingsRequest,
+    *,
+    model: str,
+) -> dict[str, Any]:
+    """Build the Ollama ``/api/embed`` request body.
+
+    ``input`` passes through in either shape — Ollama's ``/api/embed``
+    (unlike the older singular ``/api/embeddings``) accepts a string or
+    a list of strings and always answers with a list of vectors, which
+    matches the OpenAI batch convention the gateway exposes.
+
+    ``dimensions`` is deliberately NOT forwarded: Ollama has no
+    equivalent request field, and silently ignoring a caller's explicit
+    width request would risk persisting wrong-width vectors. It is
+    validated against the response instead (see
+    :func:`_from_ollama_embeddings_response`). ``user`` has no Ollama
+    analogue and is dropped.
+    """
+
+    return {"model": model, "input": request.input}
+
+
+def _from_ollama_embeddings_response(
+    payload: dict[str, Any],
+    *,
+    requested_model: str,
+    expected_dimensions: int | None,
+    provider: str,
+) -> EmbeddingsResponse:
+    """Translate an Ollama ``/api/embed`` JSON response into the OpenAI shape.
+
+    Ollama's response shape::
+
+        {
+            "model": "nomic-embed-text",
+            "embeddings": [[0.01, -0.02, ...], ...],
+            "total_duration": 123456789,
+            "load_duration": 1234567,
+            "prompt_eval_count": 8,
+        }
+
+    ``prompt_eval_count`` is the only token figure Ollama reports; it
+    maps to both ``prompt_tokens`` and ``total_tokens`` (an embeddings
+    call has no completion half).
+    """
+
+    raw = payload.get("embeddings")
+    if not isinstance(raw, list) or not raw:
+        raise ProviderHTTPError(
+            "Ollama embeddings response missing 'embeddings'",
+            upstream_status=200,
+            details={"provider": provider, "model": requested_model},
+        )
+
+    data: list[EmbeddingObject] = []
+    for index, vector in enumerate(raw):
+        if not isinstance(vector, list) or not vector:
+            raise ProviderHTTPError(
+                "Ollama returned a malformed embedding vector",
+                upstream_status=200,
+                details={"provider": provider, "model": requested_model, "index": index},
+            )
+        if expected_dimensions is not None and len(vector) != expected_dimensions:
+            # Refuse rather than hand back a vector the caller will try to
+            # store in a differently-sized pgvector column.
+            raise ProviderHTTPError(
+                f"Ollama model '{requested_model}' returned {len(vector)}-dim vectors; "
+                f"caller requested {expected_dimensions}",
+                upstream_status=200,
+                details={
+                    "provider": provider,
+                    "model": requested_model,
+                    "returned_dimensions": len(vector),
+                    "requested_dimensions": expected_dimensions,
+                },
+            )
+        data.append(EmbeddingObject(embedding=[float(value) for value in vector], index=index))
+
+    prompt_tokens = payload.get("prompt_eval_count")
+    usage = EmbeddingsUsage(
+        prompt_tokens=prompt_tokens if isinstance(prompt_tokens, int) else 0,
+        total_tokens=prompt_tokens if isinstance(prompt_tokens, int) else 0,
+    )
+
+    return EmbeddingsResponse(
+        data=data,
+        model=str(payload.get("model") or requested_model),
+        usage=usage,
+    )
 
 
 def _from_ollama_response(

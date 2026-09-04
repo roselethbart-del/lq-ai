@@ -36,6 +36,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.gateway import GatewayClient, get_gateway_client
+from app.config import get_settings
 from app.errors import GatewayInvalidResponse
 from app.models.document import DocumentChunk
 
@@ -54,9 +55,28 @@ alias to a different provider/model don't need to change code on
 this side."""
 
 EMBEDDING_DIMENSION: Final[int] = 1536
-"""Native dim of ``text-embedding-3-small``. Matches C5's
-``vector(1536)`` column. If a future ADR repoints the alias to a
-different-dim model, a migration alters the column."""
+"""Default vector width — native dim of ``text-embedding-3-small``
+(ADR 0008's pick) and the width C5's ``vector(1536)`` column shipped
+with.
+
+This is the *default* only. The effective width is
+``settings.embedding_dimension``, which a Mode-2 operator lowers to
+their Ollama model's native width (768 / 1024) alongside the migration
+that resizes the column. Read the effective value via
+:func:`effective_embedding_dimension`, not this constant — the constant
+remains exported for the OpenAI-default case and for tests that pin the
+shipped default."""
+
+
+def effective_embedding_dimension() -> int:
+    """Vector width this deployment's embedding column expects.
+
+    Wraps the setting so callers don't each reach into config, and so
+    the default stays traceable to :data:`EMBEDDING_DIMENSION`.
+    """
+
+    return get_settings().embedding_dimension
+
 
 EMBED_BATCH_SIZE: Final[int] = 64
 """Number of chunks to submit per embeddings call.
@@ -509,6 +529,32 @@ def _format_vector(vector: Sequence[float]) -> str:
     pgvector's parser accepts this representation; using a string
     binding (rather than a binary protocol) keeps the path driver-
     independent and matches how psql / migrations write vectors.
+
+    Width is validated here because this is the single choke point every
+    write to the sized ``document_chunks.embedding`` column passes
+    through. A model whose native width doesn't match the column
+    otherwise fails at INSERT with an opaque driver error; naming the
+    misconfiguration at the boundary points the operator at the actual
+    fix (align ``EMBEDDING_DIMENSION`` with the ``embedding`` alias and
+    run migration 0067).
+
+    Note this deliberately does NOT guard
+    :func:`request_embedding_vectors` — transient consumers such as the
+    Easy Playbook clustering step compute cosine similarity in memory
+    and never persist vectors, so the column's width is irrelevant to
+    them.
     """
 
+    expected = effective_embedding_dimension()
+    if len(vector) != expected:
+        raise GatewayInvalidResponse(
+            f"Embedding model returned {len(vector)}-dim vectors but this "
+            f"deployment's document_chunks.embedding column is {expected}-dim; "
+            "align EMBEDDING_DIMENSION with the configured 'embedding' alias, "
+            "then run migration 0067 to resize the column",
+            details={
+                "returned_dimensions": len(vector),
+                "expected_dimensions": expected,
+            },
+        )
     return "[" + ",".join(repr(float(v)) for v in vector) + "]"

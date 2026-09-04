@@ -978,8 +978,27 @@ The `ivfflat` index is appropriate for moderate scale; transition to `hnsw` (Pos
 Per ADR 0006, the `embedding` column was **nullable for M1** — the C5
 pipeline writes chunks with `embedding=NULL` and C6 backfills via the
 gateway's `/v1/embeddings`. The pgvector extension is enabled by
-migration 0005. The dimension `vector(1536)` matches OpenAI's
+migration 0005. The dimension shipped as `vector(1536)` to match OpenAI's
 `text-embedding-3-small` per ADR 0008 (the embedding-model decision).
+
+**The dimension is configurable.** ADR 0008 recorded the Mode-2 follow-on:
+an air-gapped operator wants an Ollama-served embedding model, and those
+are natively 768-dim (`nomic-embed-text`, `embeddinggemma`) or 1024-dim
+(`bge-m3`, `qwen3-embedding`) — never 1536. The gateway's Ollama adapter
+now implements `/api/embed`, so the column follows the model:
+
+* `EMBEDDING_DIMENSION` (api/ setting, default `1536`) declares the width.
+* Migration **0067** resizes `document_chunks.embedding` to that width and
+  rebuilds `idx_chunks_embedding` (the ivfflat index binds to the declared
+  dimension).
+* pgvector cannot reinterpret a stored vector at a different width, so the
+  migration **refuses** if any row holds a non-NULL embedding and the width
+  is changing. Clearing that state is a deliberate operator act
+  (`UPDATE document_chunks SET embedding = NULL`), after which the normal
+  backfill paths below regenerate vectors with the newly-configured model.
+* `app.knowledge.embed.request_embedding_vectors` validates returned width
+  against the setting, so a model/column mismatch surfaces as a named error
+  rather than an opaque driver failure at INSERT.
 
 C6 closes the embedding deferral via two backfill paths:
 

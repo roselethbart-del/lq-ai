@@ -26,8 +26,9 @@ What this file covers:
   :class:`ProviderHTTPError`; 5xx generic -> :class:`ProviderHTTPError`;
   network -> :class:`ProviderNetworkError`; non-JSON 200 ->
   :class:`ProviderHTTPError`.
-* ``embeddings`` -> :class:`ProviderUnsupportedError` (the embedding
-  alias still routes through OpenAI per ADR 0008).
+* ``embeddings`` -> ``/api/embed`` translation (single + batch input,
+  index ordering, usage mapping, dimension-mismatch refusal, malformed
+  and 404 upstream responses, base64 refusal).
 * Health probe — 200 / 503 / network.
 """
 
@@ -762,16 +763,142 @@ async def test_non_json_200_raises_provider_http_error() -> None:
 
 
 @pytest.mark.unit
-async def test_embeddings_raises_unsupported() -> None:
-    """The embedding alias still routes through the OpenAI adapter
-    (ADR 0008); the Ollama adapter says so explicitly."""
+@respx.mock
+async def test_embeddings_single_input_translates_to_openai_shape() -> None:
+    """``/api/embed`` returns a list of vectors; we surface the OpenAI
+    ``data[].embedding`` / ``index`` shape."""
+
+    route = respx.post(f"{OLLAMA_BASE}/api/embed").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "nomic-embed-text",
+                "embeddings": [[0.1, -0.2, 0.3]],
+                "prompt_eval_count": 4,
+            },
+        )
+    )
+    adapter = _make_adapter()
+    try:
+        result = await adapter.embeddings(
+            EmbeddingsRequest(model="embedding", input="hello"),
+            model="nomic-embed-text",
+        )
+    finally:
+        await adapter.aclose()
+
+    sent = json.loads(route.calls.last.request.content)
+    assert sent == {"model": "nomic-embed-text", "input": "hello"}
+    assert [obj.embedding for obj in result.data] == [[0.1, -0.2, 0.3]]
+    assert [obj.index for obj in result.data] == [0]
+    assert result.model == "nomic-embed-text"
+    # Ollama reports one token figure; it fills both halves.
+    assert result.usage.prompt_tokens == 4
+    assert result.usage.total_tokens == 4
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_embeddings_batch_input_preserves_order_and_indices() -> None:
+    """A list input yields one entry per text, indexed in submission order."""
+
+    respx.post(f"{OLLAMA_BASE}/api/embed").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "model": "nomic-embed-text",
+                "embeddings": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]],
+                "prompt_eval_count": 9,
+            },
+        )
+    )
+    adapter = _make_adapter()
+    try:
+        result = await adapter.embeddings(
+            EmbeddingsRequest(model="embedding", input=["a", "b", "c"]),
+            model="nomic-embed-text",
+        )
+    finally:
+        await adapter.aclose()
+
+    assert [obj.index for obj in result.data] == [0, 1, 2]
+    assert [obj.embedding for obj in result.data] == [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_embeddings_dimension_mismatch_raises() -> None:
+    """A caller that asked for an explicit width gets an error rather than
+    a wrong-width vector it would try to store in a sized pgvector column."""
+
+    respx.post(f"{OLLAMA_BASE}/api/embed").mock(
+        return_value=httpx.Response(
+            200,
+            json={"model": "nomic-embed-text", "embeddings": [[0.1, 0.2, 0.3]]},
+        )
+    )
+    adapter = _make_adapter()
+    try:
+        with pytest.raises(ProviderHTTPError) as exc_info:
+            await adapter.embeddings(
+                EmbeddingsRequest(model="embedding", input="hi", dimensions=1536),
+                model="nomic-embed-text",
+            )
+    finally:
+        await adapter.aclose()
+    assert "1536" in str(exc_info.value)
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_embeddings_missing_embeddings_key_raises() -> None:
+    """A 200 with no ``embeddings`` array is a malformed upstream response."""
+
+    respx.post(f"{OLLAMA_BASE}/api/embed").mock(
+        return_value=httpx.Response(200, json={"model": "nomic-embed-text"})
+    )
+    adapter = _make_adapter()
+    try:
+        with pytest.raises(ProviderHTTPError):
+            await adapter.embeddings(
+                EmbeddingsRequest(model="embedding", input="hi"),
+                model="nomic-embed-text",
+            )
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.unit
+async def test_embeddings_base64_encoding_format_unsupported() -> None:
+    """Ollama only returns float arrays; base64 is refused explicitly
+    rather than silently answered with floats."""
 
     adapter = _make_adapter()
     try:
         with pytest.raises(ProviderUnsupportedError):
             await adapter.embeddings(
-                EmbeddingsRequest(model="llama3.1", input="hi"),
-                model="llama3.1",
+                EmbeddingsRequest(model="embedding", input="hi", encoding_format="base64"),
+                model="nomic-embed-text",
+            )
+    finally:
+        await adapter.aclose()
+
+
+@pytest.mark.unit
+@respx.mock
+async def test_embeddings_upstream_404_translates_to_http_error() -> None:
+    """An un-pulled embedding model 404s; the adapter surfaces it as a
+    structured provider error, not a raw httpx exception."""
+
+    respx.post(f"{OLLAMA_BASE}/api/embed").mock(
+        return_value=httpx.Response(404, json={"error": 'model "nomic-embed-text" not found'})
+    )
+    adapter = _make_adapter()
+    try:
+        with pytest.raises(ProviderHTTPError):
+            await adapter.embeddings(
+                EmbeddingsRequest(model="embedding", input="hi"),
+                model="nomic-embed-text",
             )
     finally:
         await adapter.aclose()

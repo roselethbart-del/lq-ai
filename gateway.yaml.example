@@ -356,6 +356,26 @@ model_aliases:
       model: text-embedding-3-small
     fallback: []
 
+  # Mode-2 (air-gapped) embeddings — Tier 1, no cloud key required.
+  # The gateway's Ollama adapter implements /api/embed, so an operator
+  # running fully local can point the 'embedding' alias here instead of
+  # at openai-prod. Two things must move together:
+  #
+  #   1. Pull the model on the Ollama host: `ollama pull nomic-embed-text`
+  #   2. Set EMBEDDING_DIMENSION in api/'s environment to the model's
+  #      native width and run the resize migration (0067). Ollama models
+  #      are 768-dim (nomic-embed-text, embeddinggemma) or 1024-dim
+  #      (bge-m3, qwen3-embedding) — never OpenAI's 1536, so the
+  #      document_chunks.embedding column has to be resized to match.
+  #
+  # Leaving this alias declared but unused is harmless; nothing routes to
+  # it until 'embedding' above is repointed or a caller asks for it by name.
+  embedding-local:
+    primary:
+      provider: ollama-local
+      model: nomic-embed-text
+    fallback: []  # No fallback — Tier 1 must stay Tier 1.
+
 # ============================================================
 # INFERENCE TIERS — derivation overrides (PRD §1.5.2 / §3.13)
 # ============================================================
