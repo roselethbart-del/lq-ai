@@ -152,9 +152,19 @@ DEFAULT_CHARACTER_BUDGET = 50_000
 # Prevents clauses that straddle a span boundary from being missed.
 SPAN_OVERLAP_CHARACTERS = 1_500
 
-# Max output tokens. 20 clauses at ~120 tokens each = 2400; 3500 keeps
-# headroom for verbose clauses without letting the model meander.
-EASY_EXTRACT_MAX_TOKENS = 3500
+# Max output tokens. The original 3500 was calibrated assuming no
+# reasoning overhead (20 clauses at ~120 tokens each = 2400, +buffer).
+# Benchmarking against a real 50K-char span with `think=False` showed
+# that assumption was too tight: content-only generation ran past 3500
+# tokens without closing the JSON (truncated at ~15K chars, still
+# incomplete), where the same span under `think=None` (reasoning
+# enabled, given a 12K-token budget) needed only ~2400 tokens once the
+# reasoning pass finished. 6000 gives real headroom for that gap without
+# going unbounded. `_parse_extracted_clauses` also salvages complete
+# entries from a response that still overruns this budget, so a span
+# that needs more than 6000 tokens degrades to partial credit rather
+# than zero clauses.
+EASY_EXTRACT_MAX_TOKENS = 6000
 
 # Default judge-model alias. Matches the M3-A2 executor's default;
 # the alias resolves to the deployment-configured "smart" model
@@ -379,6 +389,64 @@ def _extract_response_content(response: Any) -> str | None:
     return content
 
 
+def _salvage_truncated_clauses(stripped: str) -> list[dict[str, Any]]:
+    """Recover complete ``extracted_clauses`` entries from a truncated response.
+
+    Scans for the ``"extracted_clauses"`` array and extracts every
+    balanced ``{...}`` object up to (but not including) the dangling,
+    incomplete tail left by a response that hit ``max_tokens`` before
+    the model closed the JSON. String contents (including escaped
+    quotes) are tracked so a brace inside a quoted ``clause_text``
+    doesn't desynchronize the depth count. Each candidate object is
+    parsed independently, so one malformed entry among otherwise-valid
+    ones doesn't lose the rest.
+    """
+
+    key_idx = stripped.find('"extracted_clauses"')
+    if key_idx == -1:
+        return []
+    array_start = stripped.find("[", key_idx)
+    if array_start == -1:
+        return []
+
+    out: list[dict[str, Any]] = []
+    depth = 0
+    obj_start: int | None = None
+    in_string = False
+    escape = False
+    for i in range(array_start + 1, len(stripped)):
+        ch = stripped[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                candidate = stripped[obj_start : i + 1]
+                try:
+                    candidate_parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(candidate_parsed, dict):
+                        out.append(candidate_parsed)
+                obj_start = None
+        elif ch == "]" and depth == 0:
+            break
+    return out
+
+
 def _parse_extracted_clauses(content: str) -> list[ExtractedClause]:
     """Lenient JSON parse + Pydantic validation; drop malformed entries.
 
@@ -400,23 +468,40 @@ def _parse_extracted_clauses(content: str) -> list[ExtractedClause]:
             stripped = stripped[4:]
         stripped = stripped.rstrip("`").strip()
 
+    raw_clauses: list[Any]
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        logger.warning(
-            "easy_extract: malformed JSON in LLM response",
-            extra={
-                "event": "easy_extract_malformed_json",
-                "error": str(exc),
-            },
-        )
-        return []
-
-    if not isinstance(parsed, dict):
-        return []
-    raw_clauses = parsed.get("extracted_clauses")
-    if not isinstance(raw_clauses, list):
-        return []
+        # A response cut off mid-generation (hit `max_tokens` before the
+        # model closed the JSON) fails outright here even when it holds
+        # several complete, well-formed entries before the truncation
+        # point. Salvage those rather than discarding the whole span.
+        raw_clauses = _salvage_truncated_clauses(stripped)
+        if raw_clauses:
+            logger.warning(
+                "easy_extract: truncated JSON in LLM response; salvaged complete entries",
+                extra={
+                    "event": "easy_extract_truncated_salvaged",
+                    "error": str(exc),
+                    "salvaged_count": len(raw_clauses),
+                },
+            )
+        else:
+            logger.warning(
+                "easy_extract: malformed JSON in LLM response",
+                extra={
+                    "event": "easy_extract_malformed_json",
+                    "error": str(exc),
+                },
+            )
+            return []
+    else:
+        if not isinstance(parsed, dict):
+            return []
+        maybe_clauses = parsed.get("extracted_clauses")
+        if not isinstance(maybe_clauses, list):
+            return []
+        raw_clauses = maybe_clauses
 
     out: list[ExtractedClause] = []
     for index, raw in enumerate(raw_clauses):
