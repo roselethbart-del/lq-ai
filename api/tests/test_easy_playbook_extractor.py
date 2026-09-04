@@ -24,6 +24,7 @@ from app.playbooks.easy.extractor import (
     DEFAULT_CHARACTER_BUDGET,
     SPAN_OVERLAP_CHARACTERS,
     ExtractedClause,
+    ExtractedClauseSourceOffsets,
     _build_spans,
     extract_clauses_from_document,
 )
@@ -212,6 +213,62 @@ async def test_malformed_json_response_returns_empty_list() -> None:
         gateway=gateway,  # type: ignore[arg-type]
     )
     assert clauses == []
+
+
+@pytest.mark.unit
+async def test_truncated_json_salvages_complete_entries_before_cutoff() -> None:
+    """A response that hit `max_tokens` before closing the JSON still
+    yields the entries that were fully written before the cutoff,
+    instead of discarding the whole span."""
+
+    truncated = (
+        '{"extracted_clauses": [\n'
+        '  {"issue": "Term", "clause_text": "One year."},\n'
+        '  {"issue": "Governing Law", "clause_text": "Delaware.", '
+        '"source_offsets": {"start": 10, "end": 19}},\n'
+        '  {"issue": "Indemnification", "clause_text": "Sub'  # cut off mid-string
+    )
+    gateway = _StubGateway(payloads=[truncated])
+    clauses = await extract_clauses_from_document(
+        document=_make_doc("Some text"),
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+    assert [c.issue for c in clauses] == ["Term", "Governing Law"]
+    assert clauses[1].source_offsets == ExtractedClauseSourceOffsets(start=10, end=19)
+
+
+@pytest.mark.unit
+async def test_truncated_json_with_no_complete_entries_returns_empty_list() -> None:
+    """Cut off before even the first entry closes: salvage finds nothing,
+    same empty-list outcome as any other malformed response."""
+
+    truncated = '{"extracted_clauses": [\n  {"issue": "Term", "clause_text": "One ye'
+    gateway = _StubGateway(payloads=[truncated])
+    clauses = await extract_clauses_from_document(
+        document=_make_doc("Some text"),
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+    assert clauses == []
+
+
+@pytest.mark.unit
+async def test_truncated_json_brace_inside_quoted_text_does_not_desync_depth() -> None:
+    """A literal brace inside a quoted `clause_text` (e.g. quoting a
+    contract's own use of `{}`) must not be mistaken for object
+    nesting when scanning for the salvage boundary."""
+
+    truncated = (
+        '{"extracted_clauses": [\n'
+        '  {"issue": "Defined Terms", "clause_text": "See Schedule {1} for detail."},\n'
+        '  {"issue": "Term", "clause_text": "One y'  # cut off mid-string
+    )
+    gateway = _StubGateway(payloads=[truncated])
+    clauses = await extract_clauses_from_document(
+        document=_make_doc("Some text"),
+        gateway=gateway,  # type: ignore[arg-type]
+    )
+    assert [c.issue for c in clauses] == ["Defined Terms"]
+    assert clauses[0].clause_text == "See Schedule {1} for detail."
 
 
 @pytest.mark.unit
