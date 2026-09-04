@@ -150,6 +150,25 @@ class Settings(BaseSettings):
         description="Shared secret for backend ↔ gateway. Required in prod.",
     )
 
+    # ----- Embeddings (per ADR 0008) -----
+    # Width of the vectors the configured `embedding` alias produces, and
+    # therefore of the `document_chunks.embedding` pgvector column. The
+    # default matches OpenAI `text-embedding-3-small` (ADR 0008's pick), so
+    # existing deployments are unaffected. Mode-2 operators who repoint the
+    # alias at an Ollama-served model set this to that model's native width
+    # — 768 (`nomic-embed-text`, `embeddinggemma`) or 1024 (`bge-m3`,
+    # `qwen3-embedding`) — and run the accompanying migration, which resizes
+    # the column and refuses if doing so would destroy existing vectors.
+    embedding_dimension: int = Field(
+        default=1536,
+        ge=1,
+        description=(
+            "Vector width of the configured embedding model; must match the "
+            "document_chunks.embedding column. 1536=OpenAI text-embedding-3-small, "
+            "768=nomic-embed-text/embeddinggemma, 1024=bge-m3/qwen3-embedding."
+        ),
+    )
+
     # ----- Chat history (multi-turn memory) -----
     # The chat send path (api/app/api/chats.py) replays prior turns of the
     # conversation to the model so chat is genuinely multi-turn — previously

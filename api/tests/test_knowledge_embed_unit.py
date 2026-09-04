@@ -14,6 +14,7 @@ import pytest
 import respx
 
 from app.clients.gateway import GatewayClient
+from app.config import get_settings
 from app.errors import GatewayInvalidResponse
 from app.knowledge.embed import (
     DEFAULT_EMBEDDING_MODEL,
@@ -21,12 +22,33 @@ from app.knowledge.embed import (
     _batched as batched,
     _format_vector,
     count_tokens,
+    effective_embedding_dimension,
     request_embedding_vector,
     request_embedding_vectors,
 )
 
 GATEWAY_BASE = "http://test-gateway"
 GATEWAY_KEY = "test-gw-key"
+
+# Width of the toy vectors these tests hand to `_format_vector`, which
+# guards against the configured column dimension. Declaring a matching
+# width beats shipping 1536-float fixtures.
+TOY_DIMENSION = 3
+
+
+@pytest.fixture(autouse=True)
+def _toy_embedding_dimension(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Point `settings.embedding_dimension` at the toy vector width.
+
+    Per the documented convention (`app.config.get_settings`), tests that
+    need a different config monkeypatch the env and clear the cache.
+    """
+
+    monkeypatch.setenv("EMBEDDING_DIMENSION", str(TOY_DIMENSION))
+    get_settings.cache_clear()
+    yield
+    monkeypatch.delenv("EMBEDDING_DIMENSION", raising=False)
+    get_settings.cache_clear()
 
 
 # --- Token counting -----------------------------------------------------
@@ -76,10 +98,28 @@ def test_format_vector_handles_negatives_and_zero() -> None:
 
 
 @pytest.mark.unit
-def test_embedding_dimension_matches_column_type() -> None:
-    """C6: EMBEDDING_DIMENSION is 1536 — matches the vector(1536) column."""
+def test_embedding_dimension_default_matches_shipped_column_type() -> None:
+    """The shipped default stays 1536 — the width migration 0005 created
+    and the width ADR 0008's OpenAI pick produces."""
 
     assert EMBEDDING_DIMENSION == 1536
+
+
+@pytest.mark.unit
+def test_effective_embedding_dimension_follows_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Mode-2 operator repointing `embedding` at an Ollama model sets
+    EMBEDDING_DIMENSION to that model's native width (768/1024); the
+    effective width follows the setting, not the shipped constant."""
+
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "768")
+    get_settings.cache_clear()
+    try:
+        assert effective_embedding_dimension() == 768
+    finally:
+        monkeypatch.delenv("EMBEDDING_DIMENSION", raising=False)
+        get_settings.cache_clear()
 
 
 # --- Batching -----------------------------------------------------------
@@ -196,6 +236,41 @@ async def test_request_embedding_vectors_batch() -> None:
         finally:
             await gateway.aclose()
         assert vectors == expected
+
+
+@pytest.mark.unit
+def test_format_vector_width_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model whose native width doesn't match the pgvector column is
+    caught at the write boundary, naming the misconfiguration, rather
+    than failing with an opaque driver error at INSERT."""
+
+    monkeypatch.setenv("EMBEDDING_DIMENSION", "1024")
+    get_settings.cache_clear()
+    try:
+        with pytest.raises(GatewayInvalidResponse) as exc_info:
+            _format_vector([0.1, 0.2])
+        assert "1024" in str(exc_info.value)
+    finally:
+        monkeypatch.delenv("EMBEDDING_DIMENSION", raising=False)
+        get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_request_embedding_vectors_does_not_enforce_column_width() -> None:
+    """Transient consumers (Easy Playbook clustering) compute cosine
+    similarity in memory and never persist vectors, so the fetch path
+    must not impose the storage column's width on them."""
+
+    with respx.mock(base_url=GATEWAY_BASE) as router:
+        router.post("/v1/embeddings").mock(
+            return_value=httpx.Response(200, json=_embedding_payload([[0.1, 0.2, 0.3]]))
+        )
+        gateway = GatewayClient(GATEWAY_BASE, GATEWAY_KEY)
+        try:
+            vectors = await request_embedding_vectors(["a"], gateway=gateway)
+        finally:
+            await gateway.aclose()
+    assert vectors == [[0.1, 0.2, 0.3]]
 
 
 @pytest.mark.unit
