@@ -159,6 +159,7 @@ IMPLEMENTED_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/v1/internal/skills/{skill_name}"),
     # C4 — file upload + storage
     ("POST", "/api/v1/files"),
+    ("GET", "/api/v1/files"),
     ("GET", "/api/v1/files/{file_id}"),
     ("GET", "/api/v1/files/{file_id}/content"),
     ("DELETE", "/api/v1/files/{file_id}"),

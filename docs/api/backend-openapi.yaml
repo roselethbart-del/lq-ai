@@ -1958,6 +1958,45 @@ paths:
 
   # ----------- FILES -----------
   /api/v1/files:
+    get:
+      tags: [files]
+      summary: List the caller's files
+      description: |
+        Files owned by the caller, newest first. Scoped to `owner_id` —
+        not widened for admins, since enumerating every user's uploads is
+        a different capability than reading one file by id.
+
+        Exists so a caller can choose a document without first filing it
+        into a knowledge base. Every other listing surface is KB-scoped,
+        which forced document-consuming flows (notably playbook execute,
+        which only needs a `target_document_id`) to route through a
+        knowledge base to reach a document id.
+
+        `parsed_only=true` restricts the result to files whose parse
+        pipeline has produced a `documents` row — the set a
+        document-consuming caller can actually act on, since those
+        callers need `document_id` rather than the file id.
+      parameters:
+        - name: parsed_only
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+          description: Only return files that have a parsed `document_id`.
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, default: 200, minimum: 1, maximum: 500}
+          description: Maximum rows to return; clamped server-side.
+      responses:
+        '200':
+          description: Files owned by the caller.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: {$ref: '#/components/schemas/File'}
+        '401':
+          description: Bearer token missing or invalid.
     post:
       tags: [files]
       summary: Upload a file

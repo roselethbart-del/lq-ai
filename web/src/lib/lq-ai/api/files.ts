@@ -21,6 +21,24 @@ export async function uploadFile(
 	return apiRequest<FileMeta>('/files', { method: 'POST', formData: fd });
 }
 
+/**
+ * GET /api/v1/files — the caller's own files, newest first.
+ *
+ * `parsedOnly` restricts to files whose parse pipeline has produced a
+ * `document_id`. Surfaces that act on a document (playbook execute,
+ * tabular review) need that id, not the file id, so they pass `true`
+ * rather than filtering client-side and rendering unusable rows.
+ */
+export async function listFiles(
+	opts: { parsedOnly?: boolean; limit?: number } = {}
+): Promise<FileMeta[]> {
+	const params = new URLSearchParams();
+	if (opts.parsedOnly) params.set('parsed_only', 'true');
+	if (opts.limit !== undefined) params.set('limit', String(opts.limit));
+	const qs = params.toString();
+	return apiRequest<FileMeta[]>(`/files${qs ? `?${qs}` : ''}`);
+}
+
 /** GET /api/v1/files/{id} — metadata. */
 export async function getFile(id: string): Promise<FileMeta> {
 	return apiRequest<FileMeta>(`/files/${encodeURIComponent(id)}`);

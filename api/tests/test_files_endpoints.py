@@ -190,6 +190,89 @@ async def test_upload_with_must_change_password_returns_403(
 
 
 @pytest.mark.integration
+async def test_list_unauthenticated_returns_401(client: AsyncClient) -> None:
+    response = await client.get("/api/v1/files")
+    assert response.status_code == 401
+
+
+@pytest.mark.integration
+async def test_list_returns_callers_files_newest_first(
+    client: AsyncClient, db_user: User
+) -> None:
+    """The listing exists so a caller can pick a document without first
+    filing it into a knowledge base."""
+
+    token = _bearer_for(db_user)
+    for name in ("first.pdf", "second.pdf"):
+        files, _ = _multipart_body(
+            filename=name, content_type="application/pdf", payload=b"abc"
+        )
+        upload = await client.post(
+            "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"}
+        )
+        assert upload.status_code in (200, 201)
+
+    listed = await client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert listed.status_code == 200
+    names = [row["filename"] for row in listed.json()]
+    assert "first.pdf" in names and "second.pdf" in names
+    # Newest first — the picker shows what was just uploaded at the top.
+    assert names.index("second.pdf") < names.index("first.pdf")
+
+
+@pytest.mark.integration
+async def test_list_excludes_other_users_files(
+    client: AsyncClient, db_user: User, other_user: User
+) -> None:
+    """Scoped to owner_id — not widened for admins. Enumerating another
+    user's uploads is a different capability than reading one by id."""
+
+    token_a = _bearer_for(db_user)
+    token_b = _bearer_for(other_user)
+    files, _ = _multipart_body(
+        filename="private.pdf", content_type="application/pdf", payload=b"abc"
+    )
+    await client.post(
+        "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token_a}"}
+    )
+
+    listed = await client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {token_b}"}
+    )
+    assert listed.status_code == 200
+    assert all(row["filename"] != "private.pdf" for row in listed.json())
+
+
+@pytest.mark.integration
+async def test_list_parsed_only_filters_unparsed_files(
+    client: AsyncClient, db_user: User
+) -> None:
+    """A freshly uploaded file has no `documents` row yet, so it carries no
+    `document_id` and is useless to a document-consuming caller."""
+
+    token = _bearer_for(db_user)
+    files, _ = _multipart_body(
+        filename="fresh.pdf", content_type="application/pdf", payload=b"abc"
+    )
+    await client.post(
+        "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"}
+    )
+
+    unfiltered = await client.get(
+        "/api/v1/files", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert any(row["filename"] == "fresh.pdf" for row in unfiltered.json())
+
+    filtered = await client.get(
+        "/api/v1/files?parsed_only=true", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert filtered.status_code == 200
+    assert all(row["filename"] != "fresh.pdf" for row in filtered.json())
+
+
+@pytest.mark.integration
 async def test_get_metadata_unauthenticated_returns_401(client: AsyncClient) -> None:
     response = await client.get(f"/api/v1/files/{uuid.uuid4()}")
     assert response.status_code == 401
