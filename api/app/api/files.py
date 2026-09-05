@@ -371,6 +371,57 @@ async def upload_file(
 
 
 @router.get(
+    "",
+    response_model=list[FileMetadata],
+    summary="List the caller's files",
+)
+async def list_files(
+    user: ActiveUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    parsed_only: bool = False,
+    limit: int = 200,
+) -> list[FileMetadata]:
+    """List files owned by the caller, newest first.
+
+    Added so a caller can choose a document without first filing it into
+    a knowledge base. Every other listing surface was KB-scoped, which
+    forced the playbook Apply flow to route through a knowledge base to
+    reach a ``document_id`` the execute endpoint could have taken
+    directly — a contract under review often has no business sitting in
+    a precedent library.
+
+    ``parsed_only`` restricts the result to files whose C5 parse
+    pipeline has produced a ``documents`` row. That is the set any
+    document-consuming surface can actually act on, since those callers
+    need ``document_id`` rather than the file id.
+
+    Scoped to ``owner_id`` — not widened for admins. Listing every
+    user's uploads is a different capability (and a different audit
+    story) than reading one file you were given the id for.
+    """
+
+    limit = max(1, min(limit, 500))
+
+    # Outerjoin to `documents` so `document_id` is populated in one query
+    # rather than N+1 per row (the per-file GET does its own lookup).
+    stmt = (
+        select(FileModel, Document.id)
+        .outerjoin(Document, Document.file_id == FileModel.id)
+        .where(FileModel.owner_id == user.id, FileModel.deleted_at.is_(None))
+        .order_by(FileModel.created_at.desc())
+        .limit(limit)
+    )
+    if parsed_only:
+        stmt = stmt.where(Document.id.is_not(None))
+
+    rows = (await db.execute(stmt)).all()
+    return [
+        FileMetadata.model_validate(file_row).model_copy(update={"document_id": document_id})
+        for file_row, document_id in rows
+    ]
+
+
+@router.get(
     "/{file_id}",
     response_model=FileMetadata,
     summary="Get file metadata",

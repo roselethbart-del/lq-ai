@@ -9,24 +9,25 @@
 		formatCostUSD,
 		DEFAULT_JUDGE_MODEL
 	} from '$lib/lq-ai/playbookCost';
-	import { listKnowledgeBases, listKnowledgeBaseFiles } from '$lib/lq-ai/api/knowledgeBases';
-	import type { Playbook, KnowledgeBase, KnowledgeBaseFile } from '$lib/lq-ai/types';
+	import { listFiles } from '$lib/lq-ai/api/files';
+	import type { Playbook, FileMeta } from '$lib/lq-ai/types';
 
 	export let playbook: Playbook;
 
 	const dispatch = createEventDispatcher<{ close: void }>();
 
-	// KB list (loaded on mount)
-	let kbs: KnowledgeBase[] = [];
-	let kbsLoading = false;
-	let kbsError: string | null = null;
-	let selectedKbId = '';
-
-	// File list (loaded when a KB is picked)
-	let files: KnowledgeBaseFile[] = [];
+	// The caller's own documents. Previously this picker was knowledge-base
+	// scoped: pick a KB, then a file within it. But `POST /playbooks/{id}/execute`
+	// only ever needed a `target_document_id`, and the executor never touches
+	// knowledge bases at all — the KB step was scaffolding to reach a document
+	// id, and it made a contract un-reviewable until it had been filed into a
+	// precedent library. A counterparty's draft usually has no business being
+	// there, so the picker now lists documents directly.
+	let files: FileMeta[] = [];
 	let filesLoading = false;
 	let filesError: string | null = null;
 	let selectedFileId = '';
+	let filterText = '';
 
 	let executing = false;
 	let executeError: string | null = null;
@@ -34,52 +35,34 @@
 	// Client-side cost preview per §5.2 decision.
 	$: cost = estimatePlaybookCost(playbook, DEFAULT_JUDGE_MODEL);
 
-	// Only files whose parse pipeline has produced a `documents` row are
-	// eligible — the execute endpoint takes `target_document_id` (a Document
-	// UUID, not a File UUID). Files with `document_id == null` are still
-	// parsing or failed parse; filter them out so users can't pick one.
+	// `parsed_only` already excludes unparsed rows server-side; this keeps the
+	// type narrowing honest rather than trusting the query param.
 	$: eligibleFiles = files.filter(
-		(f): f is KnowledgeBaseFile & { document_id: string } =>
+		(f): f is FileMeta & { document_id: string } =>
 			typeof f.document_id === 'string' && f.document_id.length > 0
 	);
+
+	// Free-text filter — 38 contracts is already past comfortable scrolling.
+	$: visibleFiles = filterText.trim()
+		? eligibleFiles.filter((f) =>
+				f.filename.toLowerCase().includes(filterText.trim().toLowerCase())
+			)
+		: eligibleFiles;
 
 	$: selectedFile = eligibleFiles.find((f) => f.id === selectedFileId) ?? null;
 	$: selectedDocumentId = selectedFile?.document_id ?? '';
 
-	async function loadKbs(): Promise<void> {
-		kbsLoading = true;
-		kbsError = null;
-		try {
-			kbs = await listKnowledgeBases();
-		} catch (err) {
-			kbsError = err instanceof LQAIApiError ? err.message : 'Failed to load knowledge bases.';
-		} finally {
-			kbsLoading = false;
-		}
-	}
-
-	async function loadFilesForKb(kbId: string): Promise<void> {
-		if (!kbId) {
-			files = [];
-			return;
-		}
+	async function loadFiles(): Promise<void> {
 		filesLoading = true;
 		filesError = null;
 		try {
-			files = await listKnowledgeBaseFiles(kbId);
+			files = await listFiles({ parsedOnly: true, limit: 500 });
 		} catch (err) {
 			filesError = err instanceof LQAIApiError ? err.message : 'Failed to load documents.';
 			files = [];
 		} finally {
 			filesLoading = false;
 		}
-	}
-
-	function handleKbChange(): void {
-		// Reset file selection whenever the KB changes; the previously
-		// selected file ID is meaningless under a different KB.
-		selectedFileId = '';
-		void loadFilesForKb(selectedKbId);
 	}
 
 	async function handleExecute(): Promise<void> {
@@ -109,7 +92,7 @@
 		dispatch('close');
 	}
 
-	void loadKbs();
+	void loadFiles();
 </script>
 
 <div class="lq-modal-overlay" on:click={handleOverlayClick} role="presentation"></div>
@@ -136,58 +119,43 @@
 
 	<div class="lq-modal__body">
 		<div class="lq-modal__field">
-			<label for="lq-execute-kb">Knowledge base</label>
-			{#if kbsLoading}
-				<div class="lq-modal__placeholder">Loading knowledge bases…</div>
-			{:else if kbsError}
-				<div class="lq-modal__placeholder" role="alert">{kbsError}</div>
-			{:else if kbs.length === 0}
-				<div class="lq-modal__placeholder">Upload a document to a knowledge base first.</div>
+			<label for="lq-execute-doc">Target document</label>
+			{#if filesLoading}
+				<div class="lq-modal__placeholder">Loading documents…</div>
+			{:else if filesError}
+				<div class="lq-modal__placeholder" role="alert">{filesError}</div>
+			{:else if eligibleFiles.length === 0}
+				<div class="lq-modal__placeholder">
+					No parsed documents yet. Upload a contract and wait for it to finish
+					processing, then apply the playbook to it.
+				</div>
 			{:else}
+				{#if eligibleFiles.length > 8}
+					<input
+						type="search"
+						class="lq-modal__filter"
+						placeholder="Filter by filename…"
+						bind:value={filterText}
+						data-testid="lq-playbook-execute-doc-filter"
+						disabled={executing}
+					/>
+				{/if}
 				<select
-					id="lq-execute-kb"
-					bind:value={selectedKbId}
-					on:change={handleKbChange}
-					data-testid="lq-playbook-execute-kb-picker"
+					id="lq-execute-doc"
+					bind:value={selectedFileId}
+					data-testid="lq-playbook-execute-doc-picker"
 					disabled={executing}
 				>
-					<option value="">Choose a knowledge base…</option>
-					{#each kbs as kb (kb.id)}
-						<option value={kb.id}>{kb.name}</option>
+					<option value="">Choose a document…</option>
+					{#each visibleFiles as f (f.id)}
+						<option value={f.id}>{f.filename}</option>
 					{/each}
 				</select>
+				{#if filterText.trim() && visibleFiles.length === 0}
+					<div class="lq-modal__placeholder">No documents match “{filterText}”.</div>
+				{/if}
 			{/if}
 		</div>
-
-		{#if selectedKbId}
-			<div class="lq-modal__field">
-				<label for="lq-execute-doc">Target document</label>
-				{#if filesLoading}
-					<div class="lq-modal__placeholder">Loading documents…</div>
-				{:else if filesError}
-					<div class="lq-modal__placeholder" role="alert">{filesError}</div>
-				{:else if eligibleFiles.length === 0}
-					<div class="lq-modal__placeholder">
-						No documents available in this knowledge base yet.
-						{#if files.length > 0}
-							({files.length} file{files.length === 1 ? '' : 's'} still processing.)
-						{/if}
-					</div>
-				{:else}
-					<select
-						id="lq-execute-doc"
-						bind:value={selectedFileId}
-						data-testid="lq-playbook-execute-doc-picker"
-						disabled={executing}
-					>
-						<option value="">Choose a document…</option>
-						{#each eligibleFiles as f (f.id)}
-							<option value={f.id}>{f.filename}</option>
-						{/each}
-					</select>
-				{/if}
-			</div>
-		{/if}
 
 		<div class="lq-modal__cost" data-testid="lq-playbook-cost-preview">
 			<div class="lq-modal__cost-label">Estimated cost</div>
@@ -294,6 +262,20 @@
 		font-size: 0.9375rem;
 	}
 	.lq-modal__field select:disabled {
+		opacity: 0.6;
+		cursor: not-allowed;
+	}
+	.lq-modal__filter {
+		width: 100%;
+		padding: 0.5rem 0.625rem;
+		margin-bottom: 0.5rem;
+		border: 1px solid var(--lq-border, #e5e7eb);
+		border-radius: 0.375rem;
+		background: var(--lq-surface, #ffffff);
+		color: var(--lq-text-primary, #111827);
+		font-size: 0.9375rem;
+	}
+	.lq-modal__filter:disabled {
 		opacity: 0.6;
 		cursor: not-allowed;
 	}
