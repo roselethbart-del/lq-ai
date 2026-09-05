@@ -28,14 +28,17 @@ cluster — so we don't need a cross-span dedup step here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.clients.gateway import GatewayClient
 from app.models.document import Document
+from app.playbooks.easy.concurrency import gather_bounded, new_semaphore
 from app.schemas.gateway import ChatCompletionMessage, ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
@@ -185,13 +188,17 @@ async def extract_clauses_from_document(
     judge_model: str = DEFAULT_JUDGE_MODEL,
     character_budget: int = DEFAULT_CHARACTER_BUDGET,
     span_overlap_characters: int = SPAN_OVERLAP_CHARACTERS,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> list[ExtractedClause]:
     """Extract negotiated positions from one contract.
 
     Reads :attr:`Document.normalized_content` (the M2 canonical text),
     issues one LLM call per character-budgeted span (with overlap),
     parses the structured-JSON response, and returns the merged list
-    of :class:`ExtractedClause` instances.
+    of :class:`ExtractedClause` instances. Spans run concurrently under
+    ``semaphore``; the caller passes one shared across the whole
+    generation so the bound covers total in-flight calls. Omitted, a
+    run-local one is created.
 
     Returns an empty list if the document has no normalized content
     or if every LLM call returned malformed output. Failure-of-the-
@@ -237,29 +244,42 @@ async def extract_clauses_from_document(
         },
     )
 
-    merged: list[ExtractedClause] = []
-    for index, (offset, span_text) in enumerate(spans):
-        try:
-            clauses = await _extract_one_span(
+    # Spans are independent — each carries its own offset and is rebased to
+    # document-global coordinates inside `_extract_one_span` — so they run
+    # concurrently under a shared bound. `gather_bounded` preserves order,
+    # keeping the merged clause list in document order.
+    results = await gather_bounded(
+        [
+            partial(
+                _extract_one_span,
                 gateway=gateway,
                 model=judge_model,
                 span_text=span_text,
                 span_offset=offset,
                 contract_type=contract_type,
             )
-        except Exception as exc:
+            for offset, span_text in spans
+        ],
+        semaphore=semaphore if semaphore is not None else new_semaphore(),
+    )
+
+    merged: list[ExtractedClause] = []
+    for index, result in enumerate(results):
+        if isinstance(result, BaseException):
+            # One bad span degrades clustering signal; it must not lose the
+            # clauses its siblings extracted.
             logger.warning(
                 "easy_extract: span extraction failed",
                 extra={
                     "event": "easy_extract_span_failed",
                     "document_id": str(document.id),
                     "span_index": index,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error_type": type(result).__name__,
+                    "error": str(result),
                 },
             )
             continue
-        merged.extend(clauses)
+        merged.extend(result)
 
     logger.info(
         "easy_extract: extraction complete",

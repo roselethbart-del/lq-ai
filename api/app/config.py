@@ -169,6 +169,30 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ----- Easy Playbook generation (PRD §3.7) -----
+    # The extract and assemble phases issue many small, independent LLM calls
+    # (one per document span; one per position, plus one per fallback tier).
+    # Running them strictly one-at-a-time makes wall-clock scale linearly with
+    # corpus size and is what pushes larger corpora past the worker's
+    # job_timeout. This bounds how many run at once.
+    #
+    # The ceiling that actually binds is upstream, not here: a local Ollama
+    # server serves `OLLAMA_NUM_PARALLEL` generations concurrently (1 unless
+    # the operator raises it), so requests beyond that queue server-side and
+    # raising this alone buys nothing. Cloud providers parallelize freely but
+    # enforce rate limits. 4 is a conservative default for both; 1 restores
+    # the previous strictly-sequential behavior.
+    easy_playbook_max_concurrency: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description=(
+            "Max concurrent LLM calls within one Easy Playbook generation. "
+            "Bounded by the provider's own parallelism (OLLAMA_NUM_PARALLEL "
+            "for a local server) and by cloud rate limits. 1 = sequential."
+        ),
+    )
+
     # ----- Chat history (multi-turn memory) -----
     # The chat send path (api/app/api/chats.py) replays prior turns of the
     # conversation to the model so chat is genuinely multi-turn — previously

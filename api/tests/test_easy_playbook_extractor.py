@@ -446,6 +446,41 @@ async def test_long_document_multiple_calls_offsets_rebased() -> None:
 
 
 @pytest.mark.unit
+async def test_spans_are_extracted_concurrently() -> None:
+    """Spans fan out under the shared bound rather than running one at a
+    time — wall-clock over a multi-span document is what pushes a larger
+    corpus past the worker's job_timeout."""
+
+    import asyncio
+
+    in_flight = 0
+    peak = 0
+
+    class _ConcurrencyProbeGateway:
+        async def chat_completion(self, request: Any) -> _StubResponse:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.01)
+            in_flight -= 1
+            return _StubResponse(
+                choices=[
+                    _StubChoice(message=_StubMessage(content=json.dumps({"extracted_clauses": []})))
+                ]
+            )
+
+    # Long enough to split into several spans.
+    doc = _make_doc("x" * (DEFAULT_CHARACTER_BUDGET * 4))
+    await extract_clauses_from_document(
+        document=doc,
+        gateway=_ConcurrencyProbeGateway(),  # type: ignore[arg-type]
+        semaphore=asyncio.Semaphore(3),
+    )
+    assert peak > 1, "spans still executing serially"
+    assert peak <= 3, "exceeded the caller's concurrency bound"
+
+
+@pytest.mark.unit
 async def test_one_failed_span_does_not_kill_other_spans() -> None:
     """A transport failure on span 0 doesn't block span 1 from contributing."""
 

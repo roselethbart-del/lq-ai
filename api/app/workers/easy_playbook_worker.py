@@ -43,6 +43,7 @@ from app.models.document import Document
 from app.models.playbook import EasyPlaybookGeneration
 from app.playbooks.easy.assembly import assemble_playbook
 from app.playbooks.easy.clustering import ClauseInput, cluster_clauses_by_issue
+from app.playbooks.easy.concurrency import new_semaphore
 from app.playbooks.easy.extractor import extract_clauses_from_document
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,11 @@ async def _run_pipeline(
     documents = await _load_documents(session, generation.document_ids)
     contract_type = generation.contract_type
 
+    # One semaphore for the whole run, shared by the extract and assemble
+    # phases, so `easy_playbook_max_concurrency` bounds total in-flight LLM
+    # calls rather than applying separately per document and per phase.
+    semaphore = new_semaphore()
+
     all_clauses: list[ClauseInput] = []
     for document in documents:
         try:
@@ -179,6 +185,7 @@ async def _run_pipeline(
                 document=document,
                 gateway=gateway,
                 contract_type=contract_type,
+                semaphore=semaphore,
             )
         except Exception as exc:
             logger.warning(
@@ -212,6 +219,7 @@ async def _run_pipeline(
         name=playbook_name,
         contract_type=contract_type,
         gateway=gateway,
+        semaphore=semaphore,
     )
 
     generation.draft_playbook = draft.model_dump(mode="json")

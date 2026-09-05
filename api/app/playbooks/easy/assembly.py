@@ -30,14 +30,17 @@ user-attorney corrects during the edit pass.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from collections import Counter
+from functools import partial
 from typing import Any, Final
 
 from app.clients.gateway import GatewayClient
 from app.playbooks.easy.clustering import Cluster
+from app.playbooks.easy.concurrency import gather_bounded, new_semaphore
 from app.playbooks.easy.extractor import DEFAULT_JUDGE_MODEL
 from app.schemas.gateway import ChatCompletionMessage, ChatCompletionRequest
 from app.schemas.playbooks import (
@@ -210,10 +213,13 @@ async def assemble_playbook(
     description: str = "",
     version: str = "1.0.0",
     judge_model: str = DEFAULT_JUDGE_MODEL,
+    semaphore: asyncio.Semaphore | None = None,
 ) -> PlaybookCreate:
     """Build a :class:`PlaybookCreate` from clustered clauses.
 
-    For each cluster, dispatches:
+    Positions are built concurrently under ``semaphore`` (shared with the
+    extract phase when the caller passes one, so the bound covers the
+    whole generation). For each cluster, dispatches:
 
     * 1 LLM call to the describe-position prompt → fills
       ``description``, ``redline_strategy``, ``severity_if_missing``.
@@ -236,16 +242,48 @@ async def assemble_playbook(
         judge_model: gateway model alias for the LLM calls.
     """
 
+    # Positions are independent of one another, and so are the tier calls
+    # within each. One semaphore, shared through both levels, bounds total
+    # in-flight calls rather than multiplying per level.
+    semaphore = semaphore if semaphore is not None else new_semaphore()
+    results = await gather_bounded(
+        [
+            partial(
+                _build_position,
+                cluster=cluster,
+                position_order=order,
+                gateway=gateway,
+                judge_model=judge_model,
+                contract_type=contract_type,
+                semaphore=semaphore,
+            )
+            for order, cluster in enumerate(clusters)
+        ],
+        semaphore=semaphore,
+    )
+
     positions: list[PositionCreate] = []
-    for order, cluster in enumerate(clusters):
-        position = await _build_position(
-            cluster=cluster,
-            position_order=order,
-            gateway=gateway,
-            judge_model=judge_model,
-            contract_type=contract_type,
-        )
-        positions.append(position)
+    for order, result in enumerate(results):
+        if isinstance(result, BaseException):
+            # Drop the position rather than the playbook. Each describe call
+            # already has a defensive default, so reaching here means an
+            # unexpected failure; the user-attorney reviews the draft anyway.
+            logger.warning(
+                "easy_assemble: position build failed; dropping",
+                extra={
+                    "event": "easy_assemble_position_failed",
+                    "position_order": order,
+                    "error_type": type(result).__name__,
+                    "error": str(result),
+                },
+            )
+            continue
+        positions.append(result)
+
+    # Re-number so `position_order` stays dense and zero-indexed even when a
+    # cluster was dropped above (the schema and the executor both assume it).
+    for index, position in enumerate(positions):
+        position.position_order = index
 
     return PlaybookCreate(
         name=name,
@@ -268,8 +306,13 @@ async def _build_position(
     gateway: GatewayClient,
     judge_model: str,
     contract_type: str,
+    semaphore: asyncio.Semaphore,
 ) -> PositionCreate:
-    """Produce one :class:`PositionCreate` from one :class:`Cluster`."""
+    """Produce one :class:`PositionCreate` from one :class:`Cluster`.
+
+    The describe-position call and the per-tier calls are independent, so
+    the tiers run concurrently under the caller's shared ``semaphore``.
+    """
 
     # Describe-position round (1 LLM call).
     described = await _describe_position(
@@ -279,16 +322,39 @@ async def _build_position(
         contract_type=contract_type,
     )
 
-    # Fallback tiers (N LLM calls).
+    # Fallback tiers (N LLM calls, concurrent, order preserved so `rank`
+    # still follows the clustering step's most-different-first ordering).
+    tier_results = await gather_bounded(
+        [
+            partial(
+                _describe_tier,
+                modal_text=cluster.modal_clause.clause_text,
+                tier_text=neighbor.clause_text,
+                gateway=gateway,
+                judge_model=judge_model,
+                contract_type=contract_type,
+            )
+            for neighbor in cluster.neighbor_clauses
+        ],
+        semaphore=semaphore,
+    )
+
     fallback_tiers: list[FallbackTier] = []
-    for rank, neighbor in enumerate(cluster.neighbor_clauses, start=1):
-        tier_desc = await _describe_tier(
-            modal_text=cluster.modal_clause.clause_text,
-            tier_text=neighbor.clause_text,
-            gateway=gateway,
-            judge_model=judge_model,
-            contract_type=contract_type,
-        )
+    for rank, (neighbor, tier_desc) in enumerate(
+        zip(cluster.neighbor_clauses, tier_results, strict=True), start=1
+    ):
+        if isinstance(tier_desc, BaseException):
+            # Keep the tier — its language is the verbatim clause and is the
+            # substantive half; only the generated gloss is missing.
+            logger.warning(
+                "easy_assemble: tier description failed; using default",
+                extra={
+                    "event": "easy_assemble_tier_failed",
+                    "rank": rank,
+                    "error_type": type(tier_desc).__name__,
+                },
+            )
+            tier_desc = "Variant clause; review during playbook edit."
         fallback_tiers.append(
             FallbackTier(
                 rank=rank,
