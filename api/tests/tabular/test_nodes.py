@@ -22,9 +22,14 @@ import pytest
 from app.clients.gateway import EnsembleConfig
 from app.schemas.tabular import ColumnSpec
 from app.tabular.nodes import (
+    RETRIEVAL_EMPTY,
+    RETRIEVAL_FALLBACK,
+    RETRIEVAL_MATCHED,
     _assemble_rows,
     _coerce_chunk_indices,
     _coerce_confidence,
+    _column_retrieval_text,
+    _embed_column_queries,
     _parse_cell_response,
     _shape_results_payload,
     extract_cell,
@@ -313,6 +318,147 @@ async def test_extract_cell_with_no_chunks_marks_failed() -> None:
     )
     assert cell["confidence"] == "failed"
     assert gateway.calls_received == []
+    assert cell["retrieval"] == RETRIEVAL_EMPTY
+
+
+# ---------------------------------------------------------------------------
+# Retrieval outcome — telling a search miss apart from a genuine absence
+# ---------------------------------------------------------------------------
+#
+# Both used to render as confidence='failed' + "no value in extraction
+# response". They mean opposite things to a reviewer: one says the
+# document is silent on the subject, the other says we never showed the
+# model the right part of the document. The cell now carries which.
+
+
+@pytest.mark.unit
+async def test_extract_cell_records_retrieval_outcome_on_success() -> None:
+    """A successful cell records how its evidence was found."""
+
+    gateway = _StubGateway(payloads=[_extraction_payload("Qatar")])
+    cell = await extract_cell(
+        gateway=gateway,  # type: ignore[arg-type]
+        judge_model="smart",
+        document_name="doc",
+        chunks=[_chunk(0)],
+        column=ColumnSpec(name="Governing Law", query="?"),
+        retrieval=RETRIEVAL_MATCHED,
+    )
+    assert cell["value"] == "Qatar"
+    assert cell["retrieval"] == RETRIEVAL_MATCHED
+
+
+@pytest.mark.unit
+async def test_empty_value_after_fallback_retrieval_reports_a_search_miss() -> None:
+    """Blank + fallback retrieval == "we could not find it in here".
+
+    The model was handed the document's opening chunks because search
+    found nothing, so its "not present" verdict is evidence about a cover
+    page, not about the contract. The error text has to say so."""
+
+    gateway = _StubGateway(payloads=[{"value": "", "confidence": "failed"}])
+    cell = await extract_cell(
+        gateway=gateway,  # type: ignore[arg-type]
+        judge_model="smart",
+        document_name="doc",
+        chunks=[_chunk(0, "Cover page")],
+        column=ColumnSpec(name="Governing Law", query="?"),
+        retrieval=RETRIEVAL_FALLBACK,
+    )
+    assert cell["confidence"] == "failed"
+    assert cell["retrieval"] == RETRIEVAL_FALLBACK
+    assert cell["error"] == "no relevant text found in this document for this column"
+
+
+@pytest.mark.unit
+async def test_empty_value_after_matched_retrieval_reports_a_genuine_absence() -> None:
+    """Blank + matched retrieval == the model read relevant text and
+    found no answer. That is a real finding, not a plumbing failure."""
+
+    gateway = _StubGateway(payloads=[{"value": "", "confidence": "failed"}])
+    cell = await extract_cell(
+        gateway=gateway,  # type: ignore[arg-type]
+        judge_model="smart",
+        document_name="doc",
+        chunks=[_chunk(0, "Article 21. Governing law is ...")],
+        column=ColumnSpec(name="Governing Law", query="?"),
+        retrieval=RETRIEVAL_MATCHED,
+    )
+    assert cell["confidence"] == "failed"
+    assert cell["error"] == "not found in the retrieved text"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "payload",
+    ["this is not JSON at all", "[1, 2, 3]", "{}"],
+    ids=["invalid-json", "json-but-not-an-object", "empty-object"],
+)
+async def test_unusable_response_is_distinguished_from_an_empty_answer(payload: str) -> None:
+    """A parse failure is a bug signal; an empty answer is a result.
+
+    Collapsing them hid genuinely broken model output behind a message
+    that read like a normal 'nothing found'. All three shapes the parser
+    can reject report the same distinct error."""
+
+    gateway = _StubGateway(payloads=[payload])
+    cell = await extract_cell(
+        gateway=gateway,  # type: ignore[arg-type]
+        judge_model="smart",
+        document_name="doc",
+        chunks=[_chunk(0)],
+        column=ColumnSpec(name="A", query="?"),
+    )
+    assert cell["confidence"] == "failed"
+    assert cell["error"] == "extraction response was not a usable JSON object"
+
+
+# ---------------------------------------------------------------------------
+# _column_retrieval_text — what the two retrieval sides actually search on
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_column_retrieval_text_includes_the_column_name() -> None:
+    """The name is the operator's clean noun phrase for the subject.
+
+    A query written as a prompt carries instruction words ('look for',
+    'search the whole document') that are noise to a lexical index; the
+    name is not."""
+
+    text = _column_retrieval_text(
+        ColumnSpec(name="Governing Law", query="Look for the applicable law.")
+    )
+    assert text == "Governing Law. Look for the applicable law."
+
+
+@pytest.mark.unit
+def test_column_retrieval_text_tolerates_a_missing_half() -> None:
+    assert _column_retrieval_text(ColumnSpec(name="Term", query="  ")) == "Term"
+    assert _column_retrieval_text(ColumnSpec(name="  ", query="the term")) == "the term"
+
+
+# ---------------------------------------------------------------------------
+# _embed_column_queries — never fatal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_embed_column_queries_degrades_to_none_when_embedding_fails() -> None:
+    """No embedding model, no problem — the run continues FTS-only.
+
+    A deployment without embeddings configured must keep working exactly
+    as it did before, rather than failing every cell in the grid."""
+
+    class _NoEmbeddings:
+        async def embeddings(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("no embedding model configured")
+
+    embeddings = await _embed_column_queries(
+        [ColumnSpec(name="A", query="?"), ColumnSpec(name="B", query="?")],
+        gateway=_NoEmbeddings(),  # type: ignore[arg-type]
+    )
+    assert embeddings == {"A": None, "B": None}
 
 
 # ---------------------------------------------------------------------------
@@ -668,3 +814,42 @@ def test_shape_results_payload_counts_failed_cells() -> None:
     payload = _shape_results_payload(per_cell_results, documents)
     assert payload["summary"]["total_cells"] == 2
     assert payload["summary"]["failed_cells"] == 1
+
+
+@pytest.mark.unit
+def test_shape_results_payload_counts_retrieval_fallback_cells() -> None:
+    """Fallback cells are counted separately from failed ones.
+
+    A run where most cells fell back to the document's opening pages is
+    a retrieval problem, not a run of documents that happen to be silent
+    — the summary has to make that visible without opening every cell."""
+
+    doc = uuid.uuid4()
+    per_cell_results = [
+        {
+            "document_id": str(doc),
+            "column_name": "A",
+            "value": "ok",
+            "confidence": "high",
+            "retrieval": RETRIEVAL_MATCHED,
+        },
+        {
+            "document_id": str(doc),
+            "column_name": "B",
+            "value": None,
+            "confidence": "failed",
+            "retrieval": RETRIEVAL_FALLBACK,
+        },
+        {
+            "document_id": str(doc),
+            "column_name": "C",
+            "value": None,
+            "confidence": "failed",
+            "retrieval": RETRIEVAL_FALLBACK,
+        },
+    ]
+    documents = [{"id": str(doc), "name": "NDA A"}]
+
+    payload = _shape_results_payload(per_cell_results, documents)
+    assert payload["summary"]["failed_cells"] == 2
+    assert payload["summary"]["retrieval_fallback_cells"] == 2

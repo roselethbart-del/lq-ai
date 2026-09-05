@@ -74,6 +74,7 @@ The `results` JSONB (validated by `app.schemas.tabular.TabularResults`) is:
           "tier_used": null,             // see telemetry limitation below
           "cost_usd": "0",               // see telemetry limitation below
           "verification_method": "ensemble_strict", // ensemble column: set by the Stage-4 pass
+          "retrieval": "matched",        // matched | fallback | empty
           "error": null
         },
         "Governing Law": {
@@ -83,6 +84,7 @@ The `results` JSONB (validated by `app.schemas.tabular.TabularResults`) is:
           "tier_used": null,
           "cost_usd": "0",
           "verification_method": null,   // non-ensemble column: no Stage-4 pass ran
+          "retrieval": "matched",
           "error": null
         }
         // … one entry per column
@@ -90,11 +92,33 @@ The `results` JSONB (validated by `app.schemas.tabular.TabularResults`) is:
     }
     // … one row per document, in document_ids order
   ],
-  "summary": { "total_cells": 20, "failed_cells": 0 }
+  "summary": { "total_cells": 20, "failed_cells": 0, "retrieval_fallback_cells": 0 }
 }
 ```
 
-The `results` schema is version-stamped (`schema_version`) so the result-view renderer can refuse unknown versions rather than crash.
+The `results` schema is version-stamped (`schema_version`) so the result-view renderer can refuse unknown versions rather than crash. `retrieval` and `retrieval_fallback_cells` were added without a version bump because they are additive and every reader keys off named fields; cells from earlier executions carry `retrieval: null`.
+
+---
+
+## Retrieval: what the model actually reads
+
+Each cell's extraction sees at most `RETRIEVAL_TOP_K` (4) chunks. Which four is the single biggest determinant of whether the cell is right, so the retrieval step is worth understanding before blaming the model for a blank cell.
+
+Retrieval runs `app.knowledge.retrieval.hybrid_search_document` — the same ADR [0008](adr/0008-embedding-model-and-openai-adapter.md) score combination the knowledge-base query endpoint uses, scoped to the target document instead of a KB. Both sides search on the column's **name plus its query** (`_column_retrieval_text`): a query written as a prompt carries instruction words that are noise to a lexical index, while the name ("Governing Law", "Liquidated Damages") is the operator's own clean noun phrase for the subject. The query embedding is computed **once per column per run**, not once per cell — the text is identical across every row of the grid.
+
+The lexical side matches all query terms first, and only if that finds nothing falls back to matching any term, ranked by how many distinct query terms each chunk contains. That backoff is not a refinement; it is the fix for a defect. Both executors previously matched with `websearch_to_tsquery`, believing it gave OR semantics — it does not, it AND-joins every lexeme. A column query of "Look for the governing law. Search in the whole document" therefore required a single chunk to contain *look*, *search* and *whole* alongside *govern* and *law*. Nothing matched, retrieval returned empty, and the cell was extracted from the document's cover page.
+
+**`retrieval` records which of those happened**, because the alternative is a grid that lies:
+
+| value | meaning | how a blank cell renders |
+|---|---|---|
+| `matched` | Search found text relevant to the column. | "not found" — the document is genuinely silent on it. |
+| `fallback` | Search found nothing; extraction ran against the document's opening chunks (usually a cover page or contents list). | "not located" — a retrieval miss to investigate, **not** a finding about the document. |
+| `empty` | The document has no parsed text at all. | "no text". |
+
+Before this field, both of the first two rendered identically as *"not found"* with the error `no value in extraction response`. A reviewer had no way to tell a real finding from a search miss, and `summary.retrieval_fallback_cells` now makes a run that mostly missed visible without opening every cell.
+
+If a column returns `fallback` across every document, the column's own wording is the first thing to check — short, on-vocabulary noun phrases retrieve far better than prose instructions.
 
 ---
 

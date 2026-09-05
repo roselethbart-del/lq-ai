@@ -1,4 +1,4 @@
-"""Hybrid (vector + FTS) retrieval over KB chunks (Task C6 / ADR 0008).
+"""Hybrid (vector + FTS) retrieval over chunks (Task C6 / ADR 0008).
 
 Per ADR 0008 §"Hybrid score combination":
 
@@ -10,10 +10,18 @@ Per ADR 0008 §"Hybrid score combination":
 4. ``score = (1 - alpha) * vector + alpha * fts``.
 5. Return top-``k`` by combined score.
 
-The candidate set is filtered to chunks whose owning file is attached
-to the KB AND whose ``ingestion_status='ready'`` AND whose file isn't
-soft-deleted. Per-user isolation is enforced upstream by the handler
-(the KB owner is the only caller; the handler verified ownership).
+Two scopes share that machinery:
+
+* :func:`hybrid_search` — KB-scoped. The candidate set is filtered to
+  chunks whose owning file is attached to the KB AND whose
+  ``ingestion_status='ready'`` AND whose file isn't soft-deleted.
+  Per-user isolation is enforced upstream by the handler (the KB owner
+  is the only caller; the handler verified ownership).
+* :func:`hybrid_search_document` — single-document scoped, for the
+  Tabular Review and Playbook executors, which retrieve *within* one
+  target document rather than across a library. Authorization is the
+  caller's job there too: both executors resolve the document from an
+  execution row the requesting user already owns.
 """
 
 from __future__ import annotations
@@ -61,6 +69,12 @@ class HybridSearchResult:
     vector_score: float
     fts_score: float
     hybrid_score: float
+
+    chunk_index: int = 0
+    """Ordinal position of the chunk within its document. Defaulted
+    (rather than required) so the KB-scoped callers, which key off
+    ``chunk_id``, are unaffected; the document-scoped executors carry it
+    through into their per-chunk payloads."""
 
 
 # ---------------------------------------------------------------------------
@@ -121,19 +135,247 @@ async def hybrid_search(
             limit=candidate_limit,
         )
 
+    return await _combine_and_hydrate(
+        db,
+        vector_rows=vector_rows,
+        fts_rows=fts_rows,
+        top_k=top_k,
+        alpha=alpha,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Document-scoped hybrid search
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_DOCUMENT_ALPHA: float = 0.5
+"""Mixing weight for document-scoped search.
+
+Matches the ``knowledge_bases.hybrid_alpha`` server default so the two
+scopes weight lexical and semantic evidence identically unless an
+operator has deliberately retuned a specific KB.
+"""
+
+
+async def hybrid_search_document(
+    db: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    query: str,
+    query_embedding: list[float] | None,
+    top_k: int,
+    alpha: float = DEFAULT_DOCUMENT_ALPHA,
+) -> list[HybridSearchResult]:
+    """Run hybrid search inside a single document.
+
+    Same score combination as :func:`hybrid_search` (ADR 0008), scoped
+    by ``document_chunks.document_id`` instead of KB membership. Returns
+    an empty list when neither side produced a candidate — callers treat
+    that as "this document has no text relevant to the query", which is
+    materially different from "the model read the text and found no
+    answer".
+
+    The FTS side backs off from all-terms to any-term matching; see
+    :func:`_document_fts_candidates`. ``query_embedding`` may be
+    ``None`` (embeddings unavailable or not yet computed for this
+    document), in which case the search degrades to FTS-only rather
+    than failing.
+    """
+
+    alpha = max(0.0, min(1.0, alpha))
+    candidate_limit = top_k * CANDIDATE_OVERSHOOT
+
+    vector_rows: list[tuple[uuid.UUID, float]] = []
+    if query_embedding is not None and alpha < 1.0:
+        vector_rows = await _document_vector_candidates(
+            db,
+            document_id=document_id,
+            query_embedding=query_embedding,
+            limit=candidate_limit,
+        )
+
+    fts_rows: list[tuple[uuid.UUID, float]] = []
+    if alpha > 0.0:
+        fts_rows = await _document_fts_candidates(
+            db,
+            document_id=document_id,
+            query=query,
+            limit=candidate_limit,
+        )
+
     if not vector_rows and not fts_rows:
         return []
 
-    # --- Combine ----------------------------------------------------------
+    return await _combine_and_hydrate(
+        db,
+        vector_rows=vector_rows,
+        fts_rows=fts_rows,
+        top_k=top_k,
+        alpha=alpha,
+    )
+
+
+_DOC_VECTOR_SQL = text(
+    """
+    SELECT dc.id AS chunk_id,
+           1.0 - (dc.embedding <=> CAST(:q_emb AS vector)) AS vec_score
+      FROM document_chunks dc
+     WHERE dc.document_id = :doc_id
+       AND dc.embedding IS NOT NULL
+     ORDER BY dc.embedding <=> CAST(:q_emb AS vector)
+     LIMIT :limit
+    """
+)
+
+
+async def _document_vector_candidates(
+    db: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    query_embedding: list[float],
+    limit: int,
+) -> list[tuple[uuid.UUID, float]]:
+    """pgvector cosine search scoped to one document."""
+
+    result = await db.execute(
+        _DOC_VECTOR_SQL,
+        {
+            "doc_id": str(document_id),
+            "q_emb": _format_vector(query_embedding),
+            "limit": limit,
+        },
+    )
+    rows = result.mappings().all()
+    return [(uuid.UUID(str(row["chunk_id"])), float(row["vec_score"])) for row in rows]
+
+
+# ``plainto_tsquery`` AND-joins every lexeme, so a chunk must contain
+# ALL of them. That is the right first pass: when a query's terms really
+# do co-occur, those chunks are the most precise hits available.
+_DOC_FTS_ALL_TERMS_SQL = text(
+    """
+    SELECT dc.id AS chunk_id,
+           ts_rank_cd(dc.content_tsv, plainto_tsquery('english', :q)) AS fts_score
+      FROM document_chunks dc
+     WHERE dc.document_id = :doc_id
+       AND dc.content_tsv @@ plainto_tsquery('english', :q)
+     ORDER BY fts_score DESC, dc.chunk_index ASC
+     LIMIT :limit
+    """
+)
+
+
+# Any-term backoff. ``plainto_tsquery`` never emits phrase (``<->``) or
+# negation (``!``) operators — it ignores operator syntax entirely — so
+# its rendered form is always a flat ``'a' & 'b' & 'c'`` and the
+# ``&``->``|`` rewrite is total and safe.
+#
+# Scoring is term COVERAGE (the fraction of distinct query lexemes the
+# chunk contains), not ``ts_rank_cd`` alone. Cover density rewards a
+# chunk that repeats one common term; coverage rewards a chunk that hits
+# several distinct ones, which is what "relevant to this query" means
+# once the AND constraint is gone. ``ts_rank_cd`` stays as the tiebreak.
+_DOC_FTS_ANY_TERM_SQL = text(
+    """
+    WITH q AS (
+        SELECT tsvector_to_array(to_tsvector('english', :q)) AS terms,
+               replace(plainto_tsquery('english', :q)::text, '&', '|')::tsquery AS tq
+    )
+    SELECT dc.id AS chunk_id,
+           cardinality(
+               ARRAY(
+                   SELECT unnest(q.terms)
+                   INTERSECT
+                   SELECT unnest(tsvector_to_array(dc.content_tsv))
+               )
+           )::float / NULLIF(cardinality(q.terms), 0) AS fts_score,
+           ts_rank_cd(dc.content_tsv, q.tq) AS density
+      FROM document_chunks dc, q
+     WHERE dc.document_id = :doc_id
+       AND dc.content_tsv @@ q.tq
+     ORDER BY fts_score DESC, density DESC, dc.chunk_index ASC
+     LIMIT :limit
+    """
+)
+
+
+async def _document_fts_candidates(
+    db: AsyncSession,
+    *,
+    document_id: uuid.UUID,
+    query: str,
+    limit: int,
+) -> list[tuple[uuid.UUID, float]]:
+    """FTS scoped to one document, with an any-term backoff.
+
+    Runs the all-terms (AND) query first and returns its hits when it
+    finds any. When it finds none — the common case for a query written
+    as an instruction ("Look for the governing law in the whole
+    document"), where words like *look* and *whole* become mandatory
+    search terms no clause contains — retries matching any term and
+    ranks by term coverage.
+
+    Returning ``[]`` from both passes means the document genuinely
+    shares no vocabulary with the query.
+    """
+
+    if not query.strip():
+        return []
+
+    result = await db.execute(
+        _DOC_FTS_ALL_TERMS_SQL,
+        {"doc_id": str(document_id), "q": query, "limit": limit},
+    )
+    rows = result.mappings().all()
+    if rows:
+        return [(uuid.UUID(str(row["chunk_id"])), float(row["fts_score"])) for row in rows]
+
+    result = await db.execute(
+        _DOC_FTS_ANY_TERM_SQL,
+        {"doc_id": str(document_id), "q": query, "limit": limit},
+    )
+    rows = result.mappings().all()
+    if rows:
+        log.info(
+            "document FTS fell back to any-term matching",
+            extra={
+                "event": "document_fts_any_term_backoff",
+                "document_id": str(document_id),
+                "hits": len(rows),
+            },
+        )
+    return [(uuid.UUID(str(row["chunk_id"])), float(row["fts_score"])) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Shared combine + hydrate
+# ---------------------------------------------------------------------------
+
+
+async def _combine_and_hydrate(
+    db: AsyncSession,
+    *,
+    vector_rows: list[tuple[uuid.UUID, float]],
+    fts_rows: list[tuple[uuid.UUID, float]],
+    top_k: int,
+    alpha: float,
+) -> list[HybridSearchResult]:
+    """Min-max normalize both sides, linear-combine, hydrate the top-k.
+
+    Shared by the KB-scoped and document-scoped entry points so the two
+    cannot drift apart on ADR 0008's score combination.
+    """
+
+    if not vector_rows and not fts_rows:
+        return []
+
     candidate_ids: set[uuid.UUID] = set()
     candidate_ids.update(cid for cid, _ in vector_rows)
     candidate_ids.update(cid for cid, _ in fts_rows)
 
-    vector_lookup = dict(vector_rows)
-    fts_lookup = dict(fts_rows)
-
-    vector_norm = _min_max_normalize(vector_lookup)
-    fts_norm = _min_max_normalize(fts_lookup)
+    vector_norm = _min_max_normalize(dict(vector_rows))
+    fts_norm = _min_max_normalize(dict(fts_rows))
 
     combined: list[tuple[uuid.UUID, float, float, float]] = []
     for cid in candidate_ids:
@@ -148,7 +390,6 @@ async def hybrid_search(
     if not top:
         return []
 
-    # --- Hydrate ----------------------------------------------------------
     score_map = {cid: (v, f, h) for cid, v, f, h in top}
     rows = await _hydrate_chunks(db, [cid for cid, _, _, _ in top])
 
@@ -173,6 +414,7 @@ async def hybrid_search(
                 vector_score=v_score,
                 fts_score=f_score,
                 hybrid_score=hybrid_score,
+                chunk_index=row["chunk_index"],
             )
         )
     # Re-sort because _hydrate_chunks doesn't preserve order.
@@ -270,6 +512,7 @@ _HYDRATE_SQL = text(
     """
     SELECT dc.id AS chunk_id,
            dc.document_id AS document_id,
+           dc.chunk_index AS chunk_index,
            f.id AS file_id,
            f.filename AS file_name,
            dc.content AS content,
@@ -301,6 +544,7 @@ async def _hydrate_chunks(
             {
                 "chunk_id": uuid.UUID(str(row["chunk_id"])),
                 "document_id": uuid.UUID(str(row["document_id"])),
+                "chunk_index": int(row["chunk_index"]),
                 "file_id": uuid.UUID(str(row["file_id"])),
                 "file_name": str(row["file_name"]),
                 "content": str(row["content"]),
