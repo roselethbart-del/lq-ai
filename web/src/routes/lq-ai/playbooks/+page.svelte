@@ -89,7 +89,17 @@
 				{#each playbooks as p (p.id)}
 					<tr data-testid="lq-playbook-row" data-playbook-id={p.id}>
 						<td class="lq-playbooks-table__name">
-							<div class="lq-playbooks-table__name-text">{p.name}</div>
+							<!-- The name opens the detail/edit page; "Apply" stays a
+							     separate action so reviewing a playbook and running one
+							     are never a misclick apart. -->
+							<button
+								type="button"
+								class="lq-playbooks-table__open"
+								data-testid="lq-playbook-open"
+								on:click={() => goto(`/lq-ai/playbooks/${p.id}`)}
+							>
+								{p.name}
+							</button>
 							{#if p.description}
 								<div class="lq-playbooks-table__desc">{p.description}</div>
 							{/if}
@@ -97,6 +107,14 @@
 						<td class="lq-playbooks-table__compact">{p.contract_type}</td>
 						<td class="lq-playbooks-table__compact">{formatVersion(p.version)}</td>
 						<td class="lq-playbooks-table__actions">
+							<button
+								type="button"
+								class="lq-playbooks-table__edit"
+								data-testid="lq-playbook-edit"
+								on:click={() => goto(`/lq-ai/playbooks/${p.id}`)}
+							>
+								View / Edit
+							</button>
 							<button
 								type="button"
 								class="lq-playbooks-table__apply"
@@ -184,8 +202,20 @@
 	.lq-playbooks-table tbody tr:last-child td {
 		border-bottom: none;
 	}
-	.lq-playbooks-table__name-text {
+	.lq-playbooks-table__open {
 		font-weight: 600;
+		background: transparent;
+		border: 0;
+		padding: 0;
+		font-size: inherit;
+		font-family: inherit;
+		color: var(--lq-text);
+		text-align: left;
+		cursor: pointer;
+	}
+	.lq-playbooks-table__open:hover {
+		color: var(--lq-accent);
+		text-decoration: underline;
 	}
 	.lq-playbooks-table__desc {
 		font-size: 0.8125rem;
@@ -223,5 +253,23 @@
 	}
 	.lq-playbooks-table__apply:hover {
 		opacity: 0.9;
+	}
+	/* Secondary styling: reviewing a playbook is the safe, frequent action,
+	   but "Apply" runs it against a contract, so that stays the visually
+	   primary one and the two never read as interchangeable. */
+	.lq-playbooks-table__edit {
+		padding: 0.375rem 0.75rem;
+		margin-right: 0.5rem;
+		background: transparent;
+		color: var(--lq-text);
+		border: 1px solid var(--lq-border);
+		border-radius: 0.375rem;
+		cursor: pointer;
+		font-size: 0.875rem;
+		font-weight: 500;
+	}
+	.lq-playbooks-table__edit:hover {
+		border-color: var(--lq-accent);
+		color: var(--lq-accent);
 	}
 </style>
