@@ -197,6 +197,9 @@ services:
       S3_REGION: ${S3_REGION:-us-east-1}
       # Inference Gateway
       LQ_AI_GATEWAY_URL: ${LQ_AI_GATEWAY_URL:-http://gateway:8001}
+      # Vector width of the configured `embedding` alias; must match the
+      # document_chunks.embedding column (migration 0067 resizes it).
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       LQ_AI_GATEWAY_KEY: ${LQ_AI_GATEWAY_KEY:?LQ_AI_GATEWAY_KEY is required}
       # JWT (auth — per ADR 0002 the backend owns auth)
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
@@ -279,6 +282,9 @@ services:
       # work with even on KBs configured for hybrid retrieval
       # (`hybrid_alpha < 1.0`).
       LQ_AI_GATEWAY_URL: ${LQ_AI_GATEWAY_URL:-http://gateway:8001}
+      # Vector width of the configured `embedding` alias; must match the
+      # document_chunks.embedding column (migration 0067 resizes it).
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       LQ_AI_GATEWAY_KEY: ${LQ_AI_GATEWAY_KEY:?LQ_AI_GATEWAY_KEY is required}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Persist Docling's Hugging Face model cache and EasyOCR's detection
@@ -345,6 +351,9 @@ services:
       # extractor which calls the inference gateway. Pre-wired now so
       # Phase 5 doesn't need a second docker-compose edit.
       LQ_AI_GATEWAY_URL: ${LQ_AI_GATEWAY_URL:-http://gateway:8001}
+      # Vector width of the configured `embedding` alias; must match the
+      # document_chunks.embedding column (migration 0067 resizes it).
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       LQ_AI_GATEWAY_KEY: ${LQ_AI_GATEWAY_KEY:?LQ_AI_GATEWAY_KEY is required}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # Skills loader — the worker's on_startup installs the skill

@@ -96,8 +96,23 @@ def _resize(conn, target: int) -> None:  # type: ignore[no-untyped-def]
 def _apply(target: int) -> None:
     conn = op.get_bind()
     current = _current_dimension(conn)
+
+    # Say what was resolved, always. This migration's behavior depends on
+    # an environment variable, and the failure that costs the most time is
+    # the silent one: if EMBEDDING_DIMENSION isn't visible to the process
+    # (e.g. set in .env but never mapped into the container's environment),
+    # the default resolves, the column is already that width, and the
+    # revision records itself as applied having changed nothing. Logging
+    # the resolved value makes that visible in the migration output instead
+    # of surfacing later as "embeddings still don't work".
+    print(
+        f"[0067] embedding dimension: configured={target} current={current}",
+        flush=True,
+    )
+
     if current is None or current == target:
         # Column missing, unsized, or already the right width.
+        print("[0067] no resize needed", flush=True)
         return
 
     embedded = conn.execute(
