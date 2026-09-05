@@ -243,23 +243,31 @@ async def assemble_playbook(
     """
 
     # Positions are independent of one another, and so are the tier calls
-    # within each. One semaphore, shared through both levels, bounds total
-    # in-flight calls rather than multiplying per level.
+    # within each, so both levels fan out.
+    #
+    # The semaphore bounds the LEAF calls only — the individual LLM
+    # dispatches inside `_build_position` — never `_build_position` itself.
+    # Bounding the composite deadlocks: a position would hold a slot for its
+    # whole lifetime while its own tier calls waited for a slot that only
+    # frees when the position finishes. Bounding the leaves gives the
+    # property actually wanted (total in-flight calls <= the bound) with no
+    # such cycle, so this gather is deliberately unbounded.
     semaphore = semaphore if semaphore is not None else new_semaphore()
-    results = await gather_bounded(
-        [
-            partial(
-                _build_position,
-                cluster=cluster,
-                position_order=order,
-                gateway=gateway,
-                judge_model=judge_model,
-                contract_type=contract_type,
-                semaphore=semaphore,
-            )
-            for order, cluster in enumerate(clusters)
-        ],
-        semaphore=semaphore,
+    results = list(
+        await asyncio.gather(
+            *(
+                _build_position(
+                    cluster=cluster,
+                    position_order=order,
+                    gateway=gateway,
+                    judge_model=judge_model,
+                    contract_type=contract_type,
+                    semaphore=semaphore,
+                )
+                for order, cluster in enumerate(clusters)
+            ),
+            return_exceptions=True,
+        )
     )
 
     positions: list[PositionCreate] = []
@@ -310,17 +318,19 @@ async def _build_position(
 ) -> PositionCreate:
     """Produce one :class:`PositionCreate` from one :class:`Cluster`.
 
-    The describe-position call and the per-tier calls are independent, so
-    the tiers run concurrently under the caller's shared ``semaphore``.
+    Every LLM dispatch below acquires ``semaphore`` individually. This
+    function must NOT itself be wrapped in that semaphore by its caller —
+    holding a slot across calls that need slots deadlocks.
     """
 
     # Describe-position round (1 LLM call).
-    described = await _describe_position(
-        cluster=cluster,
-        gateway=gateway,
-        judge_model=judge_model,
-        contract_type=contract_type,
-    )
+    async with semaphore:
+        described = await _describe_position(
+            cluster=cluster,
+            gateway=gateway,
+            judge_model=judge_model,
+            contract_type=contract_type,
+        )
 
     # Fallback tiers (N LLM calls, concurrent, order preserved so `rank`
     # still follows the clustering step's most-different-first ordering).
