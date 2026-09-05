@@ -35,17 +35,19 @@ import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.main import app
+from app.models.file import File as FileModel
 from app.models.user import User
 from app.security import create_access_token, hash_password
 from tests.test_storage_streaming import FakeS3Client
@@ -197,29 +199,87 @@ async def test_list_unauthenticated_returns_401(client: AsyncClient) -> None:
 
 @pytest.mark.integration
 async def test_list_returns_callers_files_newest_first(
-    client: AsyncClient, db_user: User
+    client: AsyncClient, db_user: User, db_session: AsyncSession
 ) -> None:
     """The listing exists so a caller can pick a document without first
-    filing it into a knowledge base."""
+    filing it into a knowledge base.
+
+    The two uploads are stamped with explicit, distinct ``created_at``
+    values rather than trusting the clock. In production each upload is
+    its own request and its own transaction, so `now()` differs per
+    file — but this fixture shares ONE transaction across the whole
+    test, and `now()` in Postgres is the transaction start time, so
+    both rows would otherwise carry an identical timestamp and the
+    assertion below would be decided by the query planner.
+    """
 
     token = _bearer_for(db_user)
+    uploaded: list[str] = []
     for name in ("first.pdf", "second.pdf"):
-        files, _ = _multipart_body(
-            filename=name, content_type="application/pdf", payload=b"abc"
-        )
+        files, _ = _multipart_body(filename=name, content_type="application/pdf", payload=b"abc")
         upload = await client.post(
             "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"}
         )
         assert upload.status_code in (200, 201)
+        uploaded.append(upload.json()["id"])
 
-    listed = await client.get(
-        "/api/v1/files", headers={"Authorization": f"Bearer {token}"}
-    )
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    for offset, file_id in enumerate(uploaded):
+        await db_session.execute(
+            update(FileModel)
+            .where(FileModel.id == uuid.UUID(file_id))
+            .values(created_at=base + timedelta(minutes=offset))
+        )
+    await db_session.flush()
+
+    listed = await client.get("/api/v1/files", headers={"Authorization": f"Bearer {token}"})
     assert listed.status_code == 200
     names = [row["filename"] for row in listed.json()]
     assert "first.pdf" in names and "second.pdf" in names
     # Newest first — the picker shows what was just uploaded at the top.
     assert names.index("second.pdf") < names.index("first.pdf")
+
+
+@pytest.mark.integration
+async def test_list_order_is_stable_when_timestamps_tie(
+    client: AsyncClient, db_user: User, db_session: AsyncSession
+) -> None:
+    """Files sharing a `created_at` fall back to a defined order: id desc.
+
+    `files.created_at` defaults to `now()` = transaction start, so any
+    files written in one transaction tie. Ordering on `created_at` alone
+    left the tie to the planner; combined with LIMIT that means a file
+    can vanish from a truncated listing between two identical calls.
+
+    Asserting the *specific* tiebreak rather than merely "the same order
+    twice" is deliberate: repeating an unchanged query returns a
+    consistent order anyway, so a stability-only assertion passes with
+    or without the fix and proves nothing. Ids are random
+    (`gen_random_uuid()`), so with three tied rows this assertion fails
+    for all but one of the six possible insertion orders unless the
+    query really does sort by id.
+    """
+
+    token = _bearer_for(db_user)
+    uploaded: list[str] = []
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        files, _ = _multipart_body(filename=name, content_type="application/pdf", payload=b"abc")
+        upload = await client.post(
+            "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"}
+        )
+        assert upload.status_code in (200, 201)
+        uploaded.append(upload.json()["id"])
+
+    tied = datetime(2026, 1, 1, tzinfo=UTC)
+    await db_session.execute(
+        update(FileModel).where(FileModel.owner_id == db_user.id).values(created_at=tied)
+    )
+    await db_session.flush()
+
+    listed = await client.get("/api/v1/files", headers={"Authorization": f"Bearer {token}"})
+    assert listed.status_code == 200
+    returned = [row["id"] for row in listed.json()]
+    assert returned == sorted(uploaded, key=uuid.UUID, reverse=True)
 
 
 @pytest.mark.integration
@@ -234,35 +294,23 @@ async def test_list_excludes_other_users_files(
     files, _ = _multipart_body(
         filename="private.pdf", content_type="application/pdf", payload=b"abc"
     )
-    await client.post(
-        "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token_a}"}
-    )
+    await client.post("/api/v1/files", files=files, headers={"Authorization": f"Bearer {token_a}"})
 
-    listed = await client.get(
-        "/api/v1/files", headers={"Authorization": f"Bearer {token_b}"}
-    )
+    listed = await client.get("/api/v1/files", headers={"Authorization": f"Bearer {token_b}"})
     assert listed.status_code == 200
     assert all(row["filename"] != "private.pdf" for row in listed.json())
 
 
 @pytest.mark.integration
-async def test_list_parsed_only_filters_unparsed_files(
-    client: AsyncClient, db_user: User
-) -> None:
+async def test_list_parsed_only_filters_unparsed_files(client: AsyncClient, db_user: User) -> None:
     """A freshly uploaded file has no `documents` row yet, so it carries no
     `document_id` and is useless to a document-consuming caller."""
 
     token = _bearer_for(db_user)
-    files, _ = _multipart_body(
-        filename="fresh.pdf", content_type="application/pdf", payload=b"abc"
-    )
-    await client.post(
-        "/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"}
-    )
+    files, _ = _multipart_body(filename="fresh.pdf", content_type="application/pdf", payload=b"abc")
+    await client.post("/api/v1/files", files=files, headers={"Authorization": f"Bearer {token}"})
 
-    unfiltered = await client.get(
-        "/api/v1/files", headers={"Authorization": f"Bearer {token}"}
-    )
+    unfiltered = await client.get("/api/v1/files", headers={"Authorization": f"Bearer {token}"})
     assert any(row["filename"] == "fresh.pdf" for row in unfiltered.json())
 
     filtered = await client.get(

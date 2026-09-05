@@ -1124,6 +1124,20 @@ export type TabularExecutionStatus = 'pending' | 'running' | 'completed' | 'fail
 export type TabularCellConfidence = 'high' | 'medium' | 'low' | 'failed';
 
 /**
+ * Outcome of the retrieval step behind a cell, independent of whether
+ * the extraction itself succeeded.
+ *
+ * - `matched` — search found text relevant to the column.
+ * - `fallback` — search found nothing, so extraction ran against the
+ *   document's opening chunks (typically a cover page or contents
+ *   list). A blank cell here means "we could not locate this subject",
+ *   which is a retrieval miss to investigate — NOT a finding that the
+ *   document is silent on it.
+ * - `empty` — the document has no parsed text at all.
+ */
+export type TabularCellRetrieval = 'matched' | 'fallback' | 'empty';
+
+/**
  * One column in a tabular execution's column spec. Mirrors the
  * backend `ColumnSpec` Pydantic shape (and the skill-side
  * `lq_ai.columns` frontmatter entry from M3-C1).
@@ -1170,6 +1184,14 @@ export interface TabularCellResult {
 	tier_used?: number | null;
 	cost_usd?: string | null;
 	error?: string | null;
+	/**
+	 * How the chunks behind this cell were found. `fallback` means
+	 * search found nothing relevant, so the extraction ran against the
+	 * document's opening chunks — an empty `fallback` cell is a
+	 * retrieval miss, not evidence the document is silent. Undefined on
+	 * executions produced before the field existed.
+	 */
+	retrieval?: TabularCellRetrieval | null;
 }
 
 /**

@@ -404,11 +404,19 @@ async def list_files(
 
     # Outerjoin to `documents` so `document_id` is populated in one query
     # rather than N+1 per row (the per-file GET does its own lookup).
+    #
+    # `id` breaks ties on `created_at`. Without it the order among files
+    # sharing a timestamp is whatever the planner returns, which combined
+    # with LIMIT means a file can drop out of a truncated listing
+    # entirely from one call to the next. Ties are not hypothetical:
+    # `files.created_at` defaults to `now()`, which in Postgres is the
+    # TRANSACTION start time, so every row written in one transaction
+    # carries the same value.
     stmt = (
         select(FileModel, Document.id)
         .outerjoin(Document, Document.file_id == FileModel.id)
         .where(FileModel.owner_id == user.id, FileModel.deleted_at.is_(None))
-        .order_by(FileModel.created_at.desc())
+        .order_by(FileModel.created_at.desc(), FileModel.id.desc())
         .limit(limit)
     )
     if parsed_only:

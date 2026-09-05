@@ -45,6 +45,12 @@ CellConfidence = Literal["high", "medium", "low", "failed"]
 is the M3-C2 / Decision C-10 state for cells where extraction itself
 errored (distinct from Citation Engine's red ``unverified`` state)."""
 
+CellRetrieval = Literal["matched", "fallback", "empty"]
+"""Outcome of the retrieval step behind a cell, independent of the
+extraction's own success. Lets a reader separate "the model read the
+relevant clause and found no answer" from "we never found the relevant
+clause" — two failures that used to be indistinguishable."""
+
 
 class ColumnSpec(BaseModel):
     """One column in a tabular execution's column spec.
@@ -154,6 +160,19 @@ class CellResult(BaseModel):
     """Error message when ``confidence='failed'``. Populated by the
     cell node's try/except (model error, no citation found,
     Citation Engine rejection)."""
+
+    retrieval: CellRetrieval | None = None
+    """How the chunks behind this cell were found.
+
+    ``'matched'`` — hybrid search found text relevant to the column.
+    ``'fallback'`` — search found nothing, so the extraction ran against
+    the document's opening chunks (usually a cover page or contents
+    list). A blank ``fallback`` cell means "we could not locate this
+    subject in this document", which is a retrieval miss to investigate,
+    not evidence the document is silent on it.
+    ``'empty'`` — the document has no parsed text at all.
+
+    ``None`` on executions produced before this field existed."""
 
     verification_method: str | None = None
     """The Citation-Engine verification method for the cell (Donna #6),
@@ -378,6 +397,7 @@ class TabularBulkOpRequest(BaseModel):
 __all__ = [
     "CellConfidence",
     "CellResult",
+    "CellRetrieval",
     "Citation",
     "ColumnSpec",
     "TabularBulkOpRequest",

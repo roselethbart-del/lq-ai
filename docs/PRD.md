@@ -5033,6 +5033,18 @@ The document-ingestion pipeline (ADR [0006](adr/0006-document-pipeline-architect
 
 **Acceptance criteria:** a parser adapter interface behind the ADR 0006 ingestion step, with PyMuPDF as the default adapter and at least one opt-in adapter wired end-to-end (parse → `structured_content` populated → a consumer reads it); the parser selectable by configuration; its cost (image weight, model downloads) incurred only when enabled; documented in ADR 0006's successor and in `docs/HONEST-STATE.md`; the design ADR resolves the core-vs-operator-adapter open question. Depends on a concrete structured-output consumer being scoped first (§3.3). Adjacent, keep coherent: the DOCX-ingest mini-PRD ([`docs/contribute/mini-prds/docx-ingest-support.md`](contribute/mini-prds/docx-ingest-support.md), a Pandoc branch that also writes `structured_content`) and DE-332 (text/markdown ingest). Related: ADR 0026 (the removal that opened this), DE-271 (amend the Apache Tika fallback claim per the research), DE-351 (first-run timeout — closed by the ADR 0026 removal).
 
+#### DE-388 — Mix `detection_examples` into playbook position retrieval via the vector side
+
+**Priority:** P2 · **Effort:** S · **Status (2026-09-05): filed**
+
+Playbook position retrieval (`app/playbooks/nodes.py::retrieve_node`) is lexical-only: it searches the target document using a position's `detection_keywords` and nothing else. The AND-semantics defect that made this retrieve almost nothing has been fixed (positions now match any keyword, ranked by keyword coverage, via `app.knowledge.retrieval.hybrid_search_document` at `alpha=1.0`), but the retrieval remains blind to a position's `detection_examples` — the very field that carries the position's meaning in prose rather than in keywords.
+
+Tabular Review already runs the same helper with both sides active, embedding each column's retrieval text once per run and letting the vector side rescue phrasings the keywords miss. The playbook path can adopt the identical shape: embed each position's `detection_examples` (plus its `issue`) once per execution, pass the vector to `hybrid_search_document`, and drop `alpha` to the ADR 0008 default. The plumbing already exists and is tested; what is deferred is the per-position embedding pass and the cost/latency question of one extra embedding call per position per execution.
+
+**Why it matters:** a position whose keywords are worded differently from the contract's own vocabulary currently retrieves weakly-related chunks or nothing, the classifier sees the document's opening pages, and the position is reported `missing`. That is indistinguishable in the results from a clause the contract genuinely omits — the same conflation the Tabular Review `retrieval` field now resolves per cell. A playbook-side equivalent of that field should land with this.
+
+**Acceptance criteria:** positions retrieve on keywords AND examples; the per-position embedding is computed once per execution, not once per position per document; an embedding failure degrades to today's keyword-only behaviour rather than failing the run; the results payload distinguishes "no relevant text retrieved" from "clause absent"; regression test showing a position whose keywords do not appear verbatim in the target document is still located. Related: DE-308 (position over-segmentation), ADR 0008 (hybrid score combination).
+
 ---
 
 ## 10. Appendices

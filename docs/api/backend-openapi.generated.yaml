@@ -1432,6 +1432,15 @@ components:
           - type: string
           - type: 'null'
           title: Error
+        retrieval:
+          anyOf:
+          - enum:
+            - matched
+            - fallback
+            - empty
+            type: string
+          - type: 'null'
+          title: Retrieval
         tier_used:
           anyOf:
           - type: integer
@@ -10360,6 +10369,74 @@ paths:
       tags:
       - enhance-prompt
   /api/v1/files:
+    get:
+      description: 'List files owned by the caller, newest first.
+
+
+        Added so a caller can choose a document without first filing it into
+
+        a knowledge base. Every other listing surface was KB-scoped, which
+
+        forced the playbook Apply flow to route through a knowledge base to
+
+        reach a ``document_id`` the execute endpoint could have taken
+
+        directly — a contract under review often has no business sitting in
+
+        a precedent library.
+
+
+        ``parsed_only`` restricts the result to files whose C5 parse
+
+        pipeline has produced a ``documents`` row. That is the set any
+
+        document-consuming surface can actually act on, since those callers
+
+        need ``document_id`` rather than the file id.
+
+
+        Scoped to ``owner_id`` — not widened for admins. Listing every
+
+        user''s uploads is a different capability (and a different audit
+
+        story) than reading one file you were given the id for.'
+      operationId: list_files_api_v1_files_get
+      parameters:
+      - in: query
+        name: parsed_only
+        required: false
+        schema:
+          default: false
+          title: Parsed Only
+          type: boolean
+      - in: query
+        name: limit
+        required: false
+        schema:
+          default: 200
+          title: Limit
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/FileMetadata'
+                title: Response List Files Api V1 Files Get
+                type: array
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - OAuth2PasswordBearer: []
+      summary: List the caller's files
+      tags:
+      - files
     post:
       description: 'Streaming multipart upload. The body is streamed to MinIO without
         ever loading the whole file into memory; a SHA-256 is computed as bytes flow

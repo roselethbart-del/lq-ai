@@ -6331,6 +6331,18 @@ components:
             ``ensemble_majority``), or ``null`` when the cell's column is
             not ensemble-verified or verification did not confirm support.
 
+            Each cell carries ``retrieval`` (string, nullable) — how the
+            chunks behind the cell were found: ``matched`` (hybrid search
+            found text relevant to the column), ``fallback`` (search found
+            nothing, so extraction ran against the document's opening
+            chunks — usually a cover page or contents list), or ``empty``
+            (the document has no parsed text). A blank ``fallback`` cell
+            means "we could not locate this subject in this document" — a
+            retrieval miss to investigate, NOT evidence the document is
+            silent on it. ``null`` on executions produced before this
+            field existed. ``summary.retrieval_fallback_cells`` counts the
+            ``fallback`` cells across the grid.
+
             Each cell carries a ``citations`` array. A tabular cell
             ``Citation`` is distinct from the chat ``Citation`` schema; it
             has: ``citation_id`` (uuid; deterministic display-only id —

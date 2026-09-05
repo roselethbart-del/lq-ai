@@ -37,10 +37,11 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.gateway import GatewayClient
+from app.knowledge.retrieval import hybrid_search_document
 from app.models.document import DocumentChunk
 from app.models.playbook import PlaybookExecution
 from app.observability_helpers import get_tracer, record_attributes
@@ -95,14 +96,11 @@ def make_retrieve_node(
         retrievals: list[dict[str, Any]] = []
 
         for pos in state.get("positions", []):
-            # Lexical FTS over the target document's chunks. The query
-            # is the union of detection_keywords; we'd prefer to also
-            # mix in detection_examples via vector search, but per-doc
-            # embedding search adds a layer of complexity the executor
-            # skeleton doesn't need to ship with — the keyword path
-            # works well for the high-signal contract-clause case
-            # (counterparty / cap / term / governing law), and the
-            # M3-A2 spec accepts this scope.
+            # Lexical FTS over the target document's chunks, matching
+            # any detection keyword and ranking by keyword coverage.
+            # Mixing in detection_examples via vector search is the
+            # obvious improvement (DE-388) but stays out of scope here:
+            # this node's documented contract is keyword detection.
             keywords = pos.get("detection_keywords") or []
             if not keywords:
                 # No keywords supplied → take the first chunk as a
@@ -152,34 +150,46 @@ async def _fts_over_document(
 ) -> list[dict[str, Any]]:
     """Run FTS over ``document_chunks`` scoped to one document.
 
-    Uses ``websearch_to_tsquery`` rather than ``plainto_tsquery`` so
-    multi-keyword queries with OR-like semantics rank chunks that hit
-    any keyword (the user's intent when they list multiple
-    ``detection_keywords``).
+    The caller joins a position's ``detection_keywords`` into ``query``,
+    and the intent has always been "rank chunks that hit ANY keyword".
+    This used to call ``websearch_to_tsquery``, believing it gave those
+    OR semantics; it does not — like ``plainto_tsquery`` it AND-joins
+    every lexeme, so a position listing "governing law", "applicable
+    law" and "jurisdiction" required a single chunk to contain all of
+    them. Positions with more than one or two keywords therefore
+    retrieved nothing and fell through to the document's first chunks,
+    where the classifier reliably returned ``missing``.
+
+    :func:`app.knowledge.retrieval._document_fts_candidates` now owns
+    the query construction (all-terms first, any-term backoff ranked by
+    keyword coverage); this wrapper adapts its results to the chunk
+    shape the classifier node expects.
     """
-    result = await db.execute(
-        text(
-            "SELECT dc.id::text, dc.chunk_index, dc.content, "
-            "dc.char_offset_start, dc.char_offset_end, dc.page_start, "
-            "ts_rank_cd(dc.content_tsv, websearch_to_tsquery('english', :q)) AS rank "
-            "FROM document_chunks dc "
-            "WHERE dc.document_id = :doc_id "
-            "AND dc.content_tsv @@ websearch_to_tsquery('english', :q) "
-            "ORDER BY rank DESC, dc.chunk_index ASC "
-            "LIMIT :limit"
-        ),
-        {"q": query, "doc_id": str(document_id), "limit": limit},
+
+    results = await hybrid_search_document(
+        db,
+        document_id=document_id,
+        query=query,
+        # Keyword-only retrieval: the M3-A2 executor does not embed
+        # positions, and ``detection_keywords`` are lexical by
+        # construction. Passing alpha=1.0 keeps this FTS-only while
+        # reusing the fixed query construction. Mixing in
+        # ``detection_examples`` via the vector side is the natural next
+        # step (see DE-388).
+        query_embedding=None,
+        top_k=limit,
+        alpha=1.0,
     )
     return [
         {
-            "id": row.id,
-            "chunk_index": row.chunk_index,
-            "content": row.content,
-            "char_offset_start": row.char_offset_start,
-            "char_offset_end": row.char_offset_end,
-            "page_start": row.page_start,
+            "id": str(r.chunk_id),
+            "chunk_index": r.chunk_index,
+            "content": r.content,
+            "char_offset_start": r.char_offset_start,
+            "char_offset_end": r.char_offset_end,
+            "page_start": r.page_start,
         }
-        for row in result
+        for r in results
     ]
 
 

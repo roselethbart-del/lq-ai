@@ -40,10 +40,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.citation.verification import verify
+from app.knowledge.embed import request_embedding_vector
+from app.knowledge.retrieval import hybrid_search_document
 from app.models.document import Document, DocumentChunk
 from app.models.file import File
 from app.models.tabular import TabularExecution
@@ -107,6 +109,24 @@ EXTRACT_MAX_TOKENS = 500
 RESULTS_SCHEMA_VERSION = "m3-c2-v1"
 
 _VALID_CONFIDENCES: frozenset[str] = frozenset({"high", "medium", "low", "failed"})
+
+# Per-cell retrieval outcome, persisted alongside the cell so a reader
+# can tell WHY a cell is empty. Before this existed, a retrieval miss
+# and a genuine absence both rendered as `confidence='failed'` with
+# "no value in extraction response", and the operator had no way to see
+# that the model had been handed the document's opening pages instead of
+# anything relevant to the column.
+RETRIEVAL_MATCHED = "matched"
+"""Hybrid search returned chunks relevant to the column's query."""
+
+RETRIEVAL_FALLBACK = "fallback"
+"""Search found nothing; the model was shown the document's first
+chunks purely so it had some context. A ``failed`` cell carrying this
+means "we could not find the subject in this document", NOT "this
+document does not contain it"."""
+
+RETRIEVAL_EMPTY = "empty"
+"""The document has no chunks at all (unparsed or empty extraction)."""
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +261,13 @@ def make_extract_cells_node(
         # mid-run / per-cell ensemble cost ceiling is deferred as DE-331.
         ensemble_config = await gateway.get_citation_engine_ensemble_config()
 
+        # Embed each column's retrieval text ONCE for the whole run. The
+        # text is identical across every document in the grid, so
+        # embedding per cell would multiply an identical call by the row
+        # count for no benefit. A column whose embedding fails maps to
+        # None and its cells run FTS-only.
+        query_embeddings = await _embed_column_queries(columns, gateway=gateway)
+
         tracer = get_tracer()
         for document in documents:
             document_id = uuid.UUID(document["id"])
@@ -261,12 +288,13 @@ def make_extract_cells_node(
                             "tabular.column.name": column.name,
                         },
                     )
-                    chunks = await _fts_over_document(
+                    chunks, retrieval = await _retrieve_for_cell(
                         db,
                         document_id=document_id,
-                        query=column.query,
-                        limit=RETRIEVAL_TOP_K,
+                        column=column,
+                        query_embedding=query_embeddings.get(column.name),
                     )
+                    record_attributes(cell_span, **{"tabular.retrieval": retrieval})
                     cell = await extract_cell(
                         gateway=gateway,
                         judge_model=judge_model,
@@ -274,6 +302,7 @@ def make_extract_cells_node(
                         chunks=chunks,
                         column=column,
                         verify_ensemble_config=verify_ensemble_config,
+                        retrieval=retrieval,
                     )
                     cell["document_id"] = str(document_id)
                     cell["column_name"] = column.name
@@ -292,6 +321,7 @@ async def extract_cell(
     chunks: list[dict[str, Any]],
     column: ColumnSpec,
     verify_ensemble_config: EnsembleConfig | None = None,
+    retrieval: str = RETRIEVAL_MATCHED,
 ) -> dict[str, Any]:
     """Run one cell extraction; return a cell-result dict.
 
@@ -299,18 +329,26 @@ async def extract_cell(
     exercise the LLM-dispatch + parsing logic without standing up the
     full LangGraph workflow + DB.
 
+    ``retrieval`` is the outcome of the search that produced ``chunks``
+    (see :data:`RETRIEVAL_MATCHED` / :data:`RETRIEVAL_FALLBACK`). It is
+    recorded on the cell and folded into the error text of a failure, so
+    an empty cell says which of the two very different things happened:
+    the search missed, or the model read relevant text and found no
+    answer in it.
+
     Failure paths:
 
-    * No chunks retrieved (empty document or no FTS hits at all on a
-      cold-keywordless query) → short-circuit to ``confidence='failed'``
-      without a gateway call.
+    * No chunks at all (document has no parsed text) → short-circuit to
+      ``confidence='failed'`` without a gateway call.
     * Gateway raises → ``confidence='failed'`` with ``error`` populated.
-    * LLM response is malformed JSON or missing ``value`` →
-      ``confidence='failed'``.
+    * LLM response is malformed JSON → ``confidence='failed'``.
+    * LLM returns an empty ``value`` → ``confidence='failed'``, with the
+      error distinguishing "not present in the retrieved text" from
+      "nothing relevant was retrieved to begin with".
     """
 
     if not chunks:
-        return _failed_cell("no chunks retrieved")
+        return _failed_cell("document has no parsed text", retrieval=RETRIEVAL_EMPTY)
 
     messages = _build_extract_messages(
         document_name=document_name,
@@ -343,23 +381,36 @@ async def extract_cell(
                 "error_type": type(exc).__name__,
             },
         )
-        return _failed_cell(f"{type(exc).__name__}: {exc}")
+        return _failed_cell(f"{type(exc).__name__}: {exc}", retrieval=retrieval)
 
     try:
         choices = response.choices
         if not choices:
-            return _failed_cell("empty response from gateway")
+            return _failed_cell("empty response from gateway", retrieval=retrieval)
         content = choices[0].message.content
     except AttributeError:
-        return _failed_cell("malformed gateway response")
+        return _failed_cell("malformed gateway response", retrieval=retrieval)
 
     if not content:
-        return _failed_cell("empty response content")
+        return _failed_cell("empty response content", retrieval=retrieval)
 
     parsed = _parse_cell_response(content)
+    if not parsed:
+        # Covers all three ways the parse yields nothing usable: invalid
+        # JSON, valid JSON that isn't an object, and an empty object.
+        # Worth separating from an empty `value` — that is a result,
+        # this is the model failing to answer in the required shape.
+        return _failed_cell("extraction response was not a usable JSON object", retrieval=retrieval)
     value = parsed.get("value")
     if not value or not isinstance(value, str) or not value.strip():
-        return _failed_cell("no value in extraction response")
+        # The two cases read identically on the wire but mean opposite
+        # things to a reviewer deciding whether to trust the blank.
+        reason = (
+            "no relevant text found in this document for this column"
+            if retrieval == RETRIEVAL_FALLBACK
+            else "not found in the retrieved text"
+        )
+        return _failed_cell(reason, retrieval=retrieval)
 
     confidence = _coerce_confidence(parsed.get("confidence"))
     cited_indices = _coerce_chunk_indices(
@@ -403,6 +454,7 @@ async def extract_cell(
         "cost_usd": "0",
         "error": None,
         "verification_method": verification_method,
+        "retrieval": retrieval,
     }
 
 
@@ -457,7 +509,7 @@ async def _verify_cell_ensemble(
         return None
 
 
-def _failed_cell(reason: str) -> dict[str, Any]:
+def _failed_cell(reason: str, *, retrieval: str = RETRIEVAL_MATCHED) -> dict[str, Any]:
     return {
         "value": None,
         "cited_chunk_ids": [],
@@ -466,6 +518,7 @@ def _failed_cell(reason: str) -> dict[str, Any]:
         "cost_usd": "0",
         "error": reason,
         "verification_method": None,
+        "retrieval": retrieval,
     }
 
 
@@ -492,51 +545,118 @@ def _build_extract_messages(
     ]
 
 
-async def _fts_over_document(
+def _column_retrieval_text(column: ColumnSpec) -> str:
+    """The text both retrieval sides search on for a column.
+
+    The column NAME is included, not just the query. A name is the
+    operator's own noun phrase for the thing they want ("Governing
+    Law", "Liquidated Damages") — short, on-vocabulary, and free of the
+    instruction words ("look for", "search the whole document") that a
+    query written as a prompt carries. Those instruction words are
+    exactly what poisons a lexical search, and the name is the cleanest
+    available signal for the vector side.
+    """
+
+    name = (column.name or "").strip()
+    query = (column.query or "").strip()
+    if name and query:
+        return f"{name}. {query}"
+    return name or query
+
+
+async def _embed_column_queries(
+    columns: list[ColumnSpec],
+    *,
+    gateway: GatewayClient,
+) -> dict[str, list[float] | None]:
+    """Embed each column's retrieval text once for the whole run.
+
+    A failure here is never fatal: the column maps to ``None`` and its
+    cells fall back to FTS-only retrieval. That keeps a deployment with
+    no embedding model configured — or a document ingested before
+    embeddings were switched on — working exactly as it did before,
+    rather than failing every cell.
+    """
+
+    embeddings: dict[str, list[float] | None] = {}
+    for column in columns:
+        retrieval_text = _column_retrieval_text(column)
+        if not retrieval_text:
+            embeddings[column.name] = None
+            continue
+        try:
+            embeddings[column.name] = await request_embedding_vector(
+                retrieval_text,
+                gateway=gateway,
+            )
+        except Exception as exc:
+            logger.warning(
+                "tabular column query embedding failed; falling back to FTS-only: %s",
+                exc,
+                extra={
+                    "event": "tabular_column_embed_failed",
+                    "column_name": column.name,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            embeddings[column.name] = None
+    return embeddings
+
+
+async def _retrieve_for_cell(
     db: AsyncSession,
     *,
     document_id: uuid.UUID,
-    query: str,
-    limit: int,
-) -> list[dict[str, Any]]:
-    """Lexical FTS over ``document_chunks`` scoped to one document.
+    column: ColumnSpec,
+    query_embedding: list[float] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Retrieve the chunks one cell's extraction reads.
 
-    Mirrors :func:`app.playbooks.nodes._fts_over_document` — uses
-    ``websearch_to_tsquery`` so multi-word queries with OR-like
-    semantics rank chunks that hit any token. Falls back to the first
-    N chunks when FTS yields nothing (so the LLM still sees document
-    context to evaluate)."""
+    Hybrid (vector + FTS) search scoped to the target document, per ADR
+    0008 — the same retrieval the KB query endpoint uses, rather than
+    the bare lexical search this node used to run. Returns the chunks
+    plus a retrieval outcome the caller records on the cell.
 
-    if not query.strip():
-        return await _fetch_first_chunks(db, document_id, limit=limit)
+    When the search finds nothing, we still hand the model the
+    document's first chunks (so a cell is evaluated rather than skipped)
+    but mark the cell :data:`RETRIEVAL_FALLBACK`. Those opening chunks
+    are typically a cover page or table of contents; any answer drawn
+    from them deserves the flag.
+    """
 
-    result = await db.execute(
-        text(
-            "SELECT dc.id::text, dc.chunk_index, dc.content, "
-            "dc.char_offset_start, dc.char_offset_end, dc.page_start, "
-            "ts_rank_cd(dc.content_tsv, websearch_to_tsquery('english', :q)) AS rank "
-            "FROM document_chunks dc "
-            "WHERE dc.document_id = :doc_id "
-            "AND dc.content_tsv @@ websearch_to_tsquery('english', :q) "
-            "ORDER BY rank DESC, dc.chunk_index ASC "
-            "LIMIT :limit"
-        ),
-        {"q": query, "doc_id": str(document_id), "limit": limit},
+    results = await hybrid_search_document(
+        db,
+        document_id=document_id,
+        query=_column_retrieval_text(column),
+        query_embedding=query_embedding,
+        top_k=RETRIEVAL_TOP_K,
     )
-    rows = [
-        {
-            "id": row.id,
-            "chunk_index": row.chunk_index,
-            "content": row.content,
-            "char_offset_start": row.char_offset_start,
-            "char_offset_end": row.char_offset_end,
-            "page_start": row.page_start,
-        }
-        for row in result
-    ]
-    if rows:
-        return rows
-    return await _fetch_first_chunks(db, document_id, limit=limit)
+    if results:
+        return (
+            [
+                {
+                    "id": str(r.chunk_id),
+                    "chunk_index": r.chunk_index,
+                    "content": r.content,
+                    "char_offset_start": r.char_offset_start,
+                    "char_offset_end": r.char_offset_end,
+                    "page_start": r.page_start,
+                }
+                for r in results
+            ],
+            RETRIEVAL_MATCHED,
+        )
+
+    logger.info(
+        "tabular retrieval found nothing; using the document's first chunks",
+        extra={
+            "event": "tabular_retrieval_fallback",
+            "document_id": str(document_id),
+            "column_name": column.name,
+        },
+    )
+    fallback = await _fetch_first_chunks(db, document_id, limit=RETRIEVAL_TOP_K)
+    return fallback, (RETRIEVAL_FALLBACK if fallback else RETRIEVAL_EMPTY)
 
 
 async def _fetch_first_chunks(
@@ -656,6 +776,7 @@ def _strip_state_keys(cell: dict[str, Any]) -> dict[str, Any]:
         "cost_usd",
         "error",
         "verification_method",
+        "retrieval",
     )
     return {key: cell.get(key) for key in keys}
 
@@ -669,12 +790,17 @@ def _shape_results_payload(
     rows = _assemble_rows(per_cell_results, documents)
     total = len(per_cell_results)
     failed = sum(1 for c in per_cell_results if c.get("confidence") == "failed")
+    fallback = sum(1 for c in per_cell_results if c.get("retrieval") == RETRIEVAL_FALLBACK)
+    # ``schema_version`` is deliberately NOT bumped: ``retrieval`` and
+    # ``retrieval_fallback_cells`` are additive, and every existing
+    # reader keys off named fields, so old rows and new rows both render.
     return {
         "schema_version": RESULTS_SCHEMA_VERSION,
         "rows": rows,
         "summary": {
             "total_cells": total,
             "failed_cells": failed,
+            "retrieval_fallback_cells": fallback,
         },
     }
 
@@ -751,6 +877,9 @@ def _coerce_chunk_indices(raw: Any, *, n_chunks: int) -> list[int]:
 
 __all__ = [
     "RESULTS_SCHEMA_VERSION",
+    "RETRIEVAL_EMPTY",
+    "RETRIEVAL_FALLBACK",
+    "RETRIEVAL_MATCHED",
     "RETRIEVAL_TOP_K",
     "extract_cell",
     "make_aggregate_node",

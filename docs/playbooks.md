@@ -80,7 +80,7 @@ retrieve → classify → redline → compile → END
 
 | Node | What it does | LLM calls |
 |---|---|---|
-| `retrieve` | For each position, runs Postgres FTS (`websearch_to_tsquery`) over the target document's chunks using the position's `detection_keywords`. Top-4 chunks per position (`RETRIEVAL_TOP_K`). Falls back to the document's first chunks when a position has no keywords or FTS returns no hits. | None (pure SQL). |
+| `retrieve` | For each position, runs Postgres FTS over the target document's chunks using the position's `detection_keywords` — matching all keywords first, then backing off to any keyword ranked by keyword coverage (`app.knowledge.retrieval.hybrid_search_document` at `alpha=1.0`). Top-4 chunks per position (`RETRIEVAL_TOP_K`). Falls back to the document's first chunks when a position has no keywords or FTS returns no hits. | None (pure SQL). |
 | `classify` | One structured-JSON call per position → `{verdict, confidence, matched_fallback_rank, matched_text, cited_chunk_indices, justification}`. Verdict is one of `matches_standard \| matches_fallback \| deviates \| missing`. | N (one per position). |
 | `redline` | For `deviates` verdicts only, one structured-JSON call per deviating position → `{old_text, new_text, justification}` drafted per the position's `redline_strategy`. Non-deviating rows pass through unchanged. | One per `deviates` verdict. |
 | `compile` | Assembles the per-position results into the `playbook_executions.results` JSONB payload, computes the verdict-count summary, and flips the row to `completed` (or `error` if a prior node set `state["error"]`). Sets `completed_at`. | None. |
@@ -104,12 +104,25 @@ The retrieve node uses lexical FTS over `detection_keywords` only. The
 PRD §3.7 sketch ("retrieve the matching clause(s) via hybrid search")
 and the `Position` schema's `detection_examples` field both anticipate
 embedding-based retrieval, but the M3-A2 executor does **not** run a
-per-document embedding search — the keyword path is what shipped. The
-node docstring documents this as an accepted M3-A2 scope decision; the
-high-signal contract-clause case (counterparty / cap / term / governing
-law) works well lexically. `detection_examples` is populated by the
-Easy Playbook assembly step and stored on the position, but the
-executor does not currently consume it for retrieval.
+per-document embedding search — the keyword path is what shipped.
+`detection_examples` is populated by the Easy Playbook assembly step and
+stored on the position, but the executor does not currently consume it
+for retrieval. Mixing it into the vector side is
+**[DE-388](PRD.md#9-deferred-enhancements-and-identified-future-work)**.
+
+**Corrected 2026-09-05 — keyword matching was AND, not OR.** The node
+joined a position's `detection_keywords` with spaces and matched with
+`websearch_to_tsquery`, on the stated belief that this gave OR
+semantics. It does not: like `plainto_tsquery` it AND-joins every
+lexeme, so a position had to find one chunk containing *every* keyword.
+Since Easy Playbook derives up to `MAX_KEYWORD_COUNT = 8` keywords per
+position, generated playbooks retrieved nothing for most positions, fell
+through to the "first chunks" fallback, and classified against the
+document's cover page — which reliably yields `missing` or a verdict
+grounded in the wrong clause. Retrieval now matches all keywords first
+(most precise when it hits) and backs off to any keyword ranked by how
+many distinct keywords each chunk contains. Executions produced before
+this date should be re-run rather than trusted.
 
 ### Failure handling
 
@@ -496,9 +509,19 @@ The PRD §3.7 "hybrid search" framing and the `detection_examples` field
 both anticipate embedding-based retrieval, but the M3-A2 executor runs
 FTS over `detection_keywords` only. `detection_examples` is populated by
 the wizard's assembly step and persisted, but the executor does not
-consume it. A position authored with no `detection_keywords` triggers
-the defensive "first chunks" fallback, which usually yields a `missing`
-verdict.
+consume it — deferred as
+**[DE-388](PRD.md#9-deferred-enhancements-and-identified-future-work)**.
+A position authored with no `detection_keywords` triggers the defensive
+"first chunks" fallback, which usually yields a `missing` verdict.
+
+The keyword side itself was also silently broken until 2026-09-05 (it
+AND-joined keywords instead of OR-ing them — see "Retrieval is
+lexical-only" above). That is fixed, but the lexical path still has no
+way to report *why* a position came back empty: unlike a Tabular Review
+cell, a position result does not record whether retrieval matched or
+fell back, so "clause absent" and "we never found the clause" remain
+indistinguishable in `playbook_executions.results`. DE-388 covers
+closing that gap alongside the vector side.
 
 ### No execution checkpointing or restart survival
 
