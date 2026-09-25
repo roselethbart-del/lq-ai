@@ -39,6 +39,18 @@ material is used; no real contract documents.
 | 4.5 | 2026-09-25 | Test chat + embedding through the gateway | `POST /v1/chat/completions` (smart), `POST /v1/embeddings` (embedding) | PASS | Tier 2; 768 dimensions; api, arq-worker, ingest-worker all expect 768 |
 | 4.6 | 2026-09-25 | User chat in the LQ-AI web UI | manual | PASS | Routing log: `smart` → `massed-ollama/lq-ai-default`, Tier 2 |
 | 4.7 | 2026-09-25 | Upload of fictional test document to a new, empty knowledge base; question answered (47 days) | manual; routing log + `document_chunks` | PASS | 3 new passages, all embedded via `massed-ollama/nomic-embed-text:v1.5`; the 1,341 older passages without embeddings untouched, so no existing documents were sent to the VM |
+| 5.1 | 2026-09-25 | Terminate VM in Massed (without `docker stop`): does the name leave the tailnet? | Massed Terminate; `tailscale status` every 15 s for 571 s | **FAIL** | Offline immediately, but still registered after 571 s. Cause: Terminate is an abrupt power-off, so the container's logout never runs; ephemeral cleanup takes longer than 10 min. Fix: `docker stop lq-ai-ollama` over SSH before terminating is now a required daily step (README). This time the offline device was removed by hand in the admin console (user) |
+| 5.2 | 2026-09-25 | Name free after manual removal | `tailscale status` | PASS | |
+| 5.3 | 2026-09-25 | New VM (64.247.196.50) with `MODELS=mistral:7b`; public IP closed | `curl -m 6 http://64.247.196.50:{11434,443,80}` | PASS | No answer on any port |
+| 5.4 | 2026-09-25 | Name is `lq-ai-ollama` (not `-1`) | `tailscale status` | PASS | |
+| 5.5 | 2026-09-25 | LQ-AI picks up the new model with no config change | gateway `GET /v1/models` | PASS | Picker shows `massed-ollama/mistral:7b`; `qwen3.5:9b` gone automatically |
+| 5.6 | 2026-09-25 | Default choices use the new model | `/api/tags` digests; `POST /v1/chat/completions` model `smart`, twice | PASS | `lq-ai-default` = `mistral:7b` (digest 6577803aa9a0); Tier 2; 43.3 s first (GPU load), 0.8 s second |
+| 5.7 | 2026-09-25 | Runs on the GPU | `GET /api/ps` | PASS | 8.9 GB, 100% on the GPU, context 32768 |
+| 6.1 | 2026-09-25 | Clean shutdown over SSH | `ssh Ubuntu@64.247.196.50`; `sudo docker stop lq-ai-ollama` | PASS | Username `Ubuntu`; `sudo` required (plain `docker` = permission denied). README updated |
+| 6.2 | 2026-09-25 | No running instances in Massed (billing stopped) | Massed Running Instances page (user) | PASS | Empty |
+| 6.3 | 2026-09-25 | `lq-ai-ollama` removed from the tailnet | `tailscale status` | PASS | Gone immediately, thanks to the logout on stop |
+| 6.4 | 2026-09-25 | Gateway with VM off: fails fast, doesn't hang | `POST /v1/chat/completions` (smart) inside gateway | PASS | HTTP 503 in 0.2 s: `provider_unavailable`, "failed to reach Ollama: ConnectError"; Massed models drop out of `/v1/models` |
+| 6.5 | 2026-09-25 | What the user sees in LQ-AI with VM off | chat "hello" in the web UI (user) | PASS | "Error: provider_unavailable. The assistant message was persisted with the partial content above for audit." Wording added to README |
 
 ## Test 1: local image test (free, laptop, CPU only)
 **PASS** (after one fix). Found and fixed: Ollama's 403 on requests via the tailnet
@@ -56,10 +68,34 @@ left in the command. Security check passed on both.
 **PASS.** Chat and document search in LQ-AI both run on the Massed VM, labelled Tier 2.
 
 ## Test 5: model switch (paid)
-_Not run yet._
+**PASS** after one fix. Switching to Mistral needed no LQ-AI change. Found and fixed: a
+VM terminated in Massed keeps its name on the tailnet for well over 10 minutes, so
+`docker stop` before terminating is now a required daily step.
 
 ## Test 6: teardown
-_Not run yet._
+**PASS.** Clean stop + terminate leaves nothing running or billing, frees the name, and
+LQ-AI shows a clear error instead of hanging.
 
-## Summary
-_Written at the end of testing: what passed, what failed, what was fixed._
+## Summary (2026-09-25)
+All six tests pass.
+
+Failures found and fixed along the way:
+1. **Ollama refused tailnet requests (403)** (Test 1). While listening only on its own
+   loopback, Ollama rejects requests addressed to another name. Fixed by listening
+   inside the container (still no published ports).
+2. **Key placeholder left in the command** (Test 3, first VM). It couldn't join the
+   tailnet and stopped itself; nothing was exposed. The daily routine now includes a
+   check of the command box before Deploy.
+3. **Massed's default command includes `--network=host`** (Test 3). It would have exposed
+   Ollama on the public IP. Removed from the template; the README warns about it.
+4. **The gateway reads a stored copy of `gateway.yaml` and only `OLLAMA_BASE_URL` from
+   `.env`** (Test 4). The config change was adapted and README section C documents it.
+5. **Terminating in Massed doesn't free the name** (Test 5): still taken after 10+
+   minutes. `sudo docker stop lq-ai-ollama` before terminating is now a required daily
+   step.
+
+Also fixed outside this project: LQ-AI's Redis save file was damaged by an abrupt
+shutdown (backed up, repaired with `redis-check-aof --fix`, 1,382 bytes dropped).
+
+Open decisions: Tailscale access rule to limit the VM (README step A.4);
+pseudonymization for Tier 2 (deferred).

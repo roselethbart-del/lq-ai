@@ -242,20 +242,31 @@ checked against the Ollama library on 2026-09-25. Memory needs assume the
    name, and the docker run command with your key and model filled in. **Before
    clicking Deploy, check the box:** it must not contain `PASTE-TAILSCALE-KEY` (the key
    goes there) or `--network=host`. Deploy.
-3. **Wait for READY.** When the VM shows as running, connect with SSH (IP, username and
-   password are on the Running Instances page) and watch the log:
+3. **Wait for READY.** When the VM shows as running, connect with SSH from PowerShell.
+   The IP and password are on the Running Instances page; the username is `Ubuntu`
+   (capital U). Paste the password with a **right-click**; it stays invisible. Then
+   watch the log:
    ```
-   ssh USERNAME@VM_IP
-   docker logs -f lq-ai-ollama
+   ssh Ubuntu@VM_IP
+   sudo docker logs -f lq-ai-ollama
    ```
-   Wait for a line starting with `READY:`. Press Ctrl+C to stop watching (the container
-   keeps running). The docker command may still be starting for a minute or two after
-   the VM itself is up; that's normal.
+   `sudo` is needed on Massed VMs; if asked, give the same VM password again. Wait for
+   a line starting with `READY:`. Press Ctrl+C to stop watching (the container keeps
+   running). The docker command may still be starting for a minute or two after the VM
+   itself is up; that's normal.
 4. **Quick health check** (below) in PowerShell on your laptop.
 5. **Work in LQ-AI** as usual.
-6. **Finish:** in the SSH window run `docker stop lq-ai-ollama` (clean logout, frees the
-   name immediately). Then **terminate the VM** on the Running Instances page.
-   Terminating stops billing; there's no pause.
+6. **Finish, in this order:**
+   1. In the SSH window, run `sudo docker stop lq-ai-ollama`. Wait until it prints
+      `lq-ai-ollama` (a few seconds). This logs the VM out of the tailnet and frees the
+      name `lq-ai-ollama` for tomorrow. Then type `exit`.
+   2. Then **terminate the VM** on the Running Instances page. Terminating stops
+      billing; there's no pause.
+
+   **Don't skip step 1.** Massed's Terminate switches the VM off abruptly, so it can't
+   log out itself, and the name then stays taken for a long time (still taken after
+   10 minutes in Test 5). If you forgot, remove the offline `lq-ai-ollama` in the
+   Tailscale admin console under **Machines** before launching the next VM.
 
 ### Quick health check (PowerShell on the laptop)
 
@@ -284,10 +295,12 @@ the tailnet gave the new VM a different name and LQ-AI can't find it. The log sa
 with a WARNING. Fix:
 
 1. In the Tailscale admin console, under **Machines**, remove the *offline* `lq-ai-ollama`.
-2. On the VM, run `docker restart lq-ai-ollama`. It logs out and in again under the
+2. On the VM, run `sudo docker restart lq-ai-ollama`. It logs out and in again under the
    right name.
 
-To prevent it, always run `docker stop lq-ai-ollama` before terminating (daily step 6).
+To prevent it, always run `sudo docker stop lq-ai-ollama` before terminating (daily step 6).
+If the VM is already running as `-1`, you can also remove the offline device first and
+then run `sudo docker restart lq-ai-ollama` on the VM (it takes a new certificate).
 
 **Models don't show up in LQ-AI.**
 1. Check that the log shows `READY:`.
@@ -300,7 +313,7 @@ To prevent it, always run `docker stop lq-ai-ollama` before terminating (daily s
 - The container may still be starting; check the log.
 - `ERROR: Could not join the tailnet` means the key is expired or revoked, or wasn't
   created as Reusable. Make a new key (step A.3).
-- No log at all (`docker ps` shows no `lq-ai-ollama`) means the docker run command
+- No log at all (`sudo docker ps` shows no `lq-ai-ollama`) means the docker run command
   didn't start. Check for typos.
 
 **`ERROR: Could not get an HTTPS certificate`.** Either HTTPS certificates are off in
@@ -318,12 +331,17 @@ shows `size_vram` well below `size`; or the log says `Ollama found NO GPU`).
   `OLLAMA_CONTEXT_LENGTH` (for example to 16384).
 
 **LQ-AI shows an error when the VM is off.** That's expected: with no VM there's no
-model. You'll see a "provider unavailable" style error in the chat (the exact wording is
-recorded in TEST-LOG.md, Test 6). Launch a VM and try again.
+model. The chat shows, straight away:
+
+> Error: provider_unavailable. The assistant message was persisted with the partial content above for audit.
+
+Launch a VM, wait for READY, and try again. The Massed models also disappear from the
+model picker while no VM is running, and document uploads can't be processed (they
+need the embedding model on the VM).
 
 **Detailed logs inside the container** (over SSH):
-`docker exec lq-ai-ollama tail -n 50 /tmp/ollama.log` (Ollama) and
-`docker exec lq-ai-ollama tail -n 50 /tmp/tailscaled.log` (Tailscale).
+`sudo docker exec lq-ai-ollama tail -n 50 /tmp/ollama.log` (Ollama) and
+`sudo docker exec lq-ai-ollama tail -n 50 /tmp/tailscaled.log` (Tailscale).
 
 ---
 
