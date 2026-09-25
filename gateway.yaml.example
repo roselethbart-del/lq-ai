@@ -368,7 +368,7 @@ model_aliases:
   #
   #   1. Pull the model on the Ollama host: `ollama pull nomic-embed-text`
   #   2. Set EMBEDDING_DIMENSION in api/'s environment to the model's
-  #      native width and run the resize migration (0067). Ollama models
+  #      native width and run the resize migration (0069). Ollama models
   #      are 768-dim (nomic-embed-text, embeddinggemma) or 1024-dim
   #      (bge-m3, qwen3-embedding) — never OpenAI's 1536, so the
   #      document_chunks.embedding column has to be resized to match.

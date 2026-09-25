@@ -988,7 +988,7 @@ are natively 768-dim (`nomic-embed-text`, `embeddinggemma`) or 1024-dim
 now implements `/api/embed`, so the column follows the model:
 
 * `EMBEDDING_DIMENSION` (api/ setting, default `1536`) declares the width.
-* Migration **0067** resizes `document_chunks.embedding` to that width and
+* Migration **0069** resizes `document_chunks.embedding` to that width and
   rebuilds `idx_chunks_embedding` (the ivfflat index binds to the declared
   dimension).
 * pgvector cannot reinterpret a stored vector at a different width, so the

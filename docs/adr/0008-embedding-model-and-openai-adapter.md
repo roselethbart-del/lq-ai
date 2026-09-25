@@ -181,7 +181,7 @@ embedding model is 1536-dim. It is now paid explicitly rather than
 avoided:
 
 * `EMBEDDING_DIMENSION` (default `1536`) declares the deployment's width.
-* Migration `0067` resizes `document_chunks.embedding` and rebuilds the
+* Migration `0069` resizes `document_chunks.embedding` and rebuilds the
   ivfflat index, and **refuses** rather than destroying stored vectors —
   clearing them is a deliberate operator act.
 * The api-side embed path validates returned width against the setting,
@@ -190,7 +190,7 @@ avoided:
 
 **Unchanged.** Deployments that never set `EMBEDDING_DIMENSION` see no
 behavioral difference: same default alias, same 1536 column, and
-migration 0067 is a no-op for them. The `tiktoken` / `cl100k_base`
+migration 0069 is a no-op for them. The `tiktoken` / `cl100k_base`
 tokenizer note above still applies only to the OpenAI path; token counts
 for Ollama-served models are approximate, and Ollama reports its own
 `prompt_eval_count` on each embeddings response.

@@ -258,7 +258,7 @@ services:
       # Inference Gateway
       LQ_AI_GATEWAY_URL: ${LQ_AI_GATEWAY_URL:-http://gateway:8001}
       # Vector width of the configured `embedding` alias; must match the
-      # document_chunks.embedding column (migration 0067 resizes it).
+      # document_chunks.embedding column (migration 0069 resizes it).
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       LQ_AI_GATEWAY_KEY: ${LQ_AI_GATEWAY_KEY:?LQ_AI_GATEWAY_KEY is required}
       # JWT (auth — per ADR 0002 the backend owns auth)
@@ -353,7 +353,7 @@ services:
       # (`hybrid_alpha < 1.0`).
       LQ_AI_GATEWAY_URL: ${LQ_AI_GATEWAY_URL:-http://gateway:8001}
       # Vector width of the configured `embedding` alias; must match the
-      # document_chunks.embedding column (migration 0067 resizes it).
+      # document_chunks.embedding column (migration 0069 resizes it).
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       LQ_AI_GATEWAY_KEY: ${LQ_AI_GATEWAY_KEY:?LQ_AI_GATEWAY_KEY is required}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -422,7 +422,7 @@ services:
       # Phase 5 doesn't need a second docker-compose edit.
       LQ_AI_GATEWAY_URL: ${LQ_AI_GATEWAY_URL:-http://gateway:8001}
       # Vector width of the configured `embedding` alias; must match the
-      # document_chunks.embedding column (migration 0067 resizes it).
+      # document_chunks.embedding column (migration 0069 resizes it).
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
       LQ_AI_GATEWAY_KEY: ${LQ_AI_GATEWAY_KEY:?LQ_AI_GATEWAY_KEY is required}
       LOG_LEVEL: ${LOG_LEVEL:-info}

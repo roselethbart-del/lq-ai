@@ -28,17 +28,17 @@ the newly-configured model.
 The ivfflat ANN index is dropped and recreated because it binds to the
 column's declared dimension.
 
-Revision ID: 0067
-Revises: 0066
+Revision ID: 0069
+Revises: 0068
 """
 
+from alembic import op
 from sqlalchemy import text
 
-from alembic import op
 from app.config import get_settings
 
-revision = "0067"
-down_revision = "0066"
+revision = "0069"
+down_revision = "0068"
 branch_labels = None
 depends_on = None
 
@@ -106,13 +106,13 @@ def _apply(target: int) -> None:
     # the resolved value makes that visible in the migration output instead
     # of surfacing later as "embeddings still don't work".
     print(
-        f"[0067] embedding dimension: configured={target} current={current}",
+        f"[0069] embedding dimension: configured={target} current={current}",
         flush=True,
     )
 
     if current is None or current == target:
         # Column missing, unsized, or already the right width.
-        print("[0067] no resize needed", flush=True)
+        print("[0069] no resize needed", flush=True)
         return
 
     embedded = conn.execute(

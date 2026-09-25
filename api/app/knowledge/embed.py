@@ -536,7 +536,7 @@ def _format_vector(vector: Sequence[float]) -> str:
     otherwise fails at INSERT with an opaque driver error; naming the
     misconfiguration at the boundary points the operator at the actual
     fix (align ``EMBEDDING_DIMENSION`` with the ``embedding`` alias and
-    run migration 0067).
+    run migration 0069).
 
     Note this deliberately does NOT guard
     :func:`request_embedding_vectors` — transient consumers such as the
@@ -551,7 +551,7 @@ def _format_vector(vector: Sequence[float]) -> str:
             f"Embedding model returned {len(vector)}-dim vectors but this "
             f"deployment's document_chunks.embedding column is {expected}-dim; "
             "align EMBEDDING_DIMENSION with the configured 'embedding' alias, "
-            "then run migration 0067 to resize the column",
+            "then run migration 0069 to resize the column",
             details={
                 "returned_dimensions": len(vector),
                 "expected_dimensions": expected,
