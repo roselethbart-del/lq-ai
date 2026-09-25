@@ -116,50 +116,45 @@ docker login ghcr.io -u roselethbart-del
 docker push ghcr.io/roselethbart-del/lq-ai-massed-ollama:latest
 ```
 
-### C. One-time LQ-AI change (after the first VM passes its tests)
+### C. One-time LQ-AI change (done 2026-09-25, during Test 4)
 
-Claude does this with you during Test 4. Both files are **your local files** (git
-ignores them), so this doesn't conflict with upstream updates. Back them up first.
+Both files are **your local files** (git ignores them), so this doesn't conflict with
+upstream updates. The originals are backed up in `C:\Users\bartr\lq-ai-backups\`.
 
-**`gateway.yaml`**: the old `runpod-local` entry is renamed to `massed-ollama` and
-pointed at the fixed address:
-
-```yaml
-  - name: massed-ollama
-    type: ollama
-    # Ollama on a daily Massed Compute GPU VM, reached over the tailnet at a
-    # fixed HTTPS address. See ops/massed-ollama/README.md.
-    base_url: ${MASSED_OLLAMA_BASE_URL:-https://lq-ai-ollama.tail6d9c1d.ts.net}
-    api_key_env: ''
-    tier: 2  # rented cloud VM, not your own hardware
-    models:
-      - lq-ai-default          # always = the first model in MODELS that day
-      - nomic-embed-text:v1.5  # document embeddings
-```
-
-- In `model_aliases`, `smart`, `fast` and `budget` point to `provider: massed-ollama`,
-  `model: lq-ai-default`.
-- `embedding` points to `provider: massed-ollama`, `model: nomic-embed-text:v1.5`.
-- In `inference_tiers.overrides`, `runpod-local: 2` becomes `massed-ollama: 2`. This line
-  is what makes LQ-AI show Tier 2.
-
-**`.env`**: add two lines:
+**`.env`**: only one line changed:
 
 ```
-MASSED_OLLAMA_BASE_URL=https://lq-ai-ollama.tail6d9c1d.ts.net
-LOCAL_INFERENCE_ENABLED=false
+OLLAMA_BASE_URL=https://lq-ai-ollama.tail6d9c1d.ts.net
 ```
 
-The second line switches off the old `ollama-local` entry, which pointed at the dead
-RunPod address and was labelled Tier 1. The `local`, `local-fast` and `local-thinking`
-choices will then say "unavailable", which is correct because there is no model on your
-laptop.
+**`gateway.yaml`**:
+- The old `runpod-local` entry is renamed to `massed-ollama` (Tier 2), with
+  `base_url: ${OLLAMA_BASE_URL:-https://lq-ai-ollama.tail6d9c1d.ts.net}` and models
+  `lq-ai-default` and `nomic-embed-text:v1.5`. It reads `OLLAMA_BASE_URL` because
+  that's the only Ollama variable `docker-compose.yml` passes to the gateway.
+- `smart`, `fast` and `budget` point to `massed-ollama` / `lq-ai-default`.
+- `embedding` points to `massed-ollama` / `nomic-embed-text:v1.5` (768 numbers, matching
+  `EMBEDDING_DIMENSION=768` and the database).
+- In `inference_tiers.overrides`, `massed-ollama: 2` replaces `runpod-local: 2`. This
+  line is what makes LQ-AI show Tier 2.
+- The old `ollama-local` entry (labelled Tier 1) is switched off with `enabled: false`.
+  The `local`, `local-fast` and `local-thinking` choices still appear in the picker but
+  answer "unavailable", which is correct because there's no model on your laptop.
 
-Then restart only the gateway:
+**Important: the gateway runs from its own stored copy.** It doesn't read
+`gateway.yaml` directly: it uses `/etc/lq-ai/gateway.yaml` inside the Docker volume
+`gateway-config`, which was created from your file on first start. After editing your
+`gateway.yaml`, copy it into place and restart the gateway:
 
 ```powershell
-docker compose up -d --force-recreate gateway
+docker compose exec gateway cp /usr/share/lq-ai/gateway.yaml.example /etc/lq-ai/gateway.yaml
+docker compose up -d --no-deps --force-recreate gateway
 ```
+
+(Inside the container, your `gateway.yaml` appears under the name
+`gateway.yaml.example`.) After an `.env` change, only the second command is needed.
+Caution: model aliases changed in LQ-AI's admin screen live only in the stored copy;
+the first command would overwrite them.
 
 **Why `lq-ai-default`?** LQ-AI's default choices (and the citation checker) must name
 one exact model. Each day the container gives the first model in `MODELS` a second,
@@ -180,28 +175,30 @@ In the Massed web UI, deploy a VM from a Docker image:
   ```
 - **Docker run command** (one line; replace the two CAPITALISED parts):
   ```
-  docker run -d --name lq-ai-ollama --gpus all --stop-timeout 30 -e TS_AUTHKEY=PASTE-TAILSCALE-KEY -e TS_HOSTNAME=lq-ai-ollama -e MODELS=MODEL-TAG -e OLLAMA_CONTEXT_LENGTH=32768 ghcr.io/roselethbart-del/lq-ai-massed-ollama:latest
+  docker run -d --runtime=nvidia --gpus all --shm-size 10g --name lq-ai-ollama --stop-timeout 30 -e TS_AUTHKEY=PASTE-TAILSCALE-KEY -e TS_HOSTNAME=lq-ai-ollama -e MODELS=MODEL-TAG -e OLLAMA_CONTEXT_LENGTH=32768 ghcr.io/roselethbart-del/lq-ai-massed-ollama:latest
   ```
+
+> **Important:** Massed pre-fills this box with its own line containing
+> `--network=host`. Always replace the **whole** box with the line above.
+> `--network=host` would put Ollama on the VM's public internet address.
 
 What each part means:
 
 | Part | Meaning |
 |---|---|
 | `-d --name lq-ai-ollama` | Run in the background under a name, so `docker logs lq-ai-ollama` works |
-| `--gpus all` | Give the container the VM's GPU(s) |
+| `--runtime=nvidia --gpus all` | Give the container the VM's GPU(s), the way Massed's own default line does |
+| `--shm-size 10g` | Extra shared memory; part of Massed's default line, harmless |
 | `--stop-timeout 30` | On stop, allow 30 s for the clean Tailscale logout |
 | `-e TS_AUTHKEY=...` | Your Tailscale key from one-time step A.3 |
 | `-e TS_HOSTNAME=lq-ai-ollama` | The fixed name. Only change it for tests |
 | `-e MODELS=...` | The model tag(s) from the table below. Several are allowed, comma-separated, e.g. `qwen3.5:9b,mistral:7b`. The first is the default |
 | `-e OLLAMA_CONTEXT_LENGTH=32768` | How much text the model can consider at once (about 25,000 words). Larger needs more GPU memory |
 
-What it deliberately does **not** have: no `-p` (no public ports), and no `--cap-add`
-or `--device` (Tailscale runs as a normal program, needing no extra privileges).
-`nomic-embed-text:v1.5` is always downloaded as well; you don't list it.
-
-> **To be confirmed in Test 3** (the Massed docs don't say): whether the "Docker run
-> command" box wants the full line above including the image name (their own example
-> does), and whether Massed adds `--gpus all` itself.
+What it deliberately does **not** have: no `--network=host` and no `-p` (no public
+ports), and no `--cap-add` or `--device` (Tailscale runs as a normal program, needing
+no extra privileges). `nomic-embed-text:v1.5` is always downloaded as well; you don't
+list it.
 
 **Your Tailscale key and Massed:** the key is part of the command you paste, so Massed
 stores it with your instance details. That's why it's an expiring key you can revoke at
@@ -242,7 +239,9 @@ checked against the Ollama library on 2026-09-25. Memory needs assume the
 
 1. **Choose the model** and look up its GPU size in the table.
 2. **Launch** on https://vm.massedcompute.com: pick that GPU type, quantity 1, the image
-   name, and the docker run command with your key and model filled in. Deploy.
+   name, and the docker run command with your key and model filled in. **Before
+   clicking Deploy, check the box:** it must not contain `PASTE-TAILSCALE-KEY` (the key
+   goes there) or `--network=host`. Deploy.
 3. **Wait for READY.** When the VM shows as running, connect with SSH (IP, username and
    password are on the Running Instances page) and watch the log:
    ```
@@ -309,8 +308,8 @@ the Tailscale admin console (step A.1), or the weekly limit was reached. The fre
 certificate service allows **5 certificates per week for the same name**, and each VM
 start uses one. More than 5 launches in 7 days (including restarts) will hit it.
 Temporary workaround: launch with `-e TS_HOSTNAME=lq-ai-ollama-b`, and for that week set
-`MASSED_OLLAMA_BASE_URL=https://lq-ai-ollama-b.tail6d9c1d.ts.net` in `.env`, then
-restart the gateway.
+`OLLAMA_BASE_URL=https://lq-ai-ollama-b.tail6d9c1d.ts.net` in `.env`, then run
+`docker compose up -d --no-deps --force-recreate gateway`. Change it back afterwards.
 
 **The model runs on the CPU instead of the GPU** (very slow answers; health check 4
 shows `size_vram` well below `size`; or the log says `Ollama found NO GPU`).
