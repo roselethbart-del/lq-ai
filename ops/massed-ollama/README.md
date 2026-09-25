@@ -221,6 +221,7 @@ checked against the Ollama library on 2026-09-25. Memory needs assume the
 | `magistral:24b` (reasoning) | Mistral | 14.3 GB | 48 GB |
 | `mistral-small3.2:24b` | Mistral | 15.2 GB | 48 GB |
 | `qwen3.5:27b` | Qwen | 17.4 GB | 48 GB |
+| `qwen3.8:27b` | Qwen | 17.7 GB | 48 GB |
 | `qwen3:30b` | Qwen | 18.6 GB | 48 GB |
 | `qwen3:32b` | Qwen | 20.2 GB | 48 GB |
 | `qwen3.5:35b` | Qwen | 23.9 GB | 48 GB |
