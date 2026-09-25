@@ -1,0 +1,59 @@
+# Builds the LQ-AI Massed Ollama image (ops/massed-ollama/) and publishes it
+# to GitHub Container Registry as ghcr.io/<your-github-name>/lq-ai-massed-ollama.
+#
+# Runs when files in ops/massed-ollama/ change on the local/massed-ollama
+# branch, or by hand from the Actions tab ("Run workflow").
+#
+# Each third-party action is pinned to an exact commit (version in the comment),
+# so an upstream change can't silently alter what this build runs.
+
+name: massed-ollama image
+
+on:
+  push:
+    branches: [local/massed-ollama]
+    paths:
+      - ops/massed-ollama/**
+      - .github/workflows/massed-ollama-image.yml
+  workflow_dispatch:
+
+# Least privilege: read the code, write the package. Nothing else.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Get the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up the image builder
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Work out the image name and tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/lq-ai-massed-ollama
+          # "latest" for daily use, plus a tag per commit so any past build can be reused.
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - name: Build and publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ops/massed-ollama
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
