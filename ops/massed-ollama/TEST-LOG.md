@@ -18,6 +18,9 @@ material is used; no real contract documents.
 | 1.9 | 2026-09-25 | Plain HTTP on the tailnet, port 11434 | `curl http://lq-ai-ollama-test.tail6d9c1d.ts.net:11434/api/tags` | NOTE | Answers 200. Tailnet-only and encrypted by WireGuard, not public. Can be limited to HTTPS (443) with a Tailscale access rule (README step A.4) |
 | 1.10 | 2026-09-25 | Second `docker stop`: offline and removed | `docker stop`, `tailscale status` | PASS | Gone from the tailnet |
 | 1.11 | 2026-09-25 | Cleanup | `docker rm`, `docker rmi` | PASS | Test container and image removed |
+| 2.1 | 2026-09-25 | GitHub Actions build + publish | push of `local/massed-ollama`; run 36104849643 | PASS | Built in 1 min 59 s; `ghcr.io/roselethbart-del/lq-ai-massed-ollama:latest` |
+| 2.2 | 2026-09-25 | Image is public (anonymous access) | anonymous `ghcr.io/token` + manifest request | PASS | HTTP 200 without login; public automatically because the fork is public |
+| 2.3 | 2026-09-25 | Logged-out `docker pull` | `DOCKER_CONFIG=<empty> docker pull --platform linux/amd64 ...` | PASS | Digest `sha256:6b8684cc...`; amd64; contains the Test 1 fix (`OLLAMA_HOST=0.0.0.0:11434`). First try without `--platform` failed only because the laptop is ARM; Massed VMs are amd64 |
 
 ## Test 1: local image test (free, laptop, CPU only)
 **PASS** (after one fix). Found and fixed: Ollama's 403 on requests via the tailnet
@@ -25,7 +28,7 @@ name (see 1.4a). Also confirmed: the embedding size (768) matches LQ-AI's settin
 logout on stop frees the name so the next start gets the same name.
 
 ## Test 2: published image (free)
-_Not run yet._
+**PASS.** GitHub builds and publishes the image; it can be downloaded without logging in.
 
 ## Test 3: first Massed VM (paid)
 _Not run yet._

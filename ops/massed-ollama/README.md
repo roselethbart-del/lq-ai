@@ -94,9 +94,14 @@ ghcr.io/roselethbart-del/lq-ai-massed-ollama:latest
 2. [ ] Push the `local/massed-ollama` branch to your fork (Claude does this after you say yes).
    GitHub then builds the image automatically (about 3–5 minutes). Watch it under
    **Actions** > **massed-ollama image**. A green tick means success.
-3. [ ] **Make the image public** (Massed must be able to download it without logging in):
-   on your GitHub profile open **Packages** > **lq-ai-massed-ollama** > **Package
+3. [x] **The image must be public** (Massed downloads it without logging in). This
+   happened automatically because your fork is public (verified in Test 2). If it ever
+   isn't, open your GitHub profile > **Packages** > **lq-ai-massed-ollama** > **Package
    settings** > **Change visibility** > **Public**.
+
+The image is built for Intel/AMD processors, which is what Massed VMs use. Your laptop
+has an ARM processor, so for local tests either build it yourself (as in Test 1) or add
+`--platform linux/amd64` when downloading.
 
 To rebuild later (for example after an update), use **Actions** > **massed-ollama image**
 > **Run workflow**, choosing the `local/massed-ollama` branch.
