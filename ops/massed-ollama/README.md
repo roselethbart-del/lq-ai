@@ -89,11 +89,11 @@ Your fork is `https://github.com/roselethbart-del/lq-ai`. The image will be:
 ghcr.io/roselethbart-del/lq-ai-massed-ollama:latest
 ```
 
-1. [ ] On your fork, open **Actions**. If GitHub asks, click **"I understand my
-   workflows, go ahead and enable them"**.
-2. [ ] Push the `local/massed-ollama` branch to your fork (Claude does this after you say yes).
-   GitHub then builds the image automatically (about 3–5 minutes). Watch it under
-   **Actions** > **massed-ollama image**. A green tick means success.
+1. [x] Actions is enabled on your fork.
+2. [x] The files live on your fork's `main` branch. When anything in
+   `ops/massed-ollama/` changes there, GitHub rebuilds the image automatically (about
+   2 minutes). Watch it under **Actions** > **massed-ollama image**. A green tick means
+   success.
 3. [x] **The image must be public** (Massed downloads it without logging in). This
    happened automatically because your fork is public (verified in Test 2). If it ever
    isn't, open your GitHub profile > **Packages** > **lq-ai-massed-ollama** > **Package
@@ -103,8 +103,8 @@ The image is built for Intel/AMD processors, which is what Massed VMs use. Your 
 has an ARM processor, so for local tests either build it yourself (as in Test 1) or add
 `--platform linux/amd64` when downloading.
 
-To rebuild later (for example after an update), use **Actions** > **massed-ollama image**
-> **Run workflow**, choosing the `local/massed-ollama` branch.
+To rebuild by hand (for example after an update), open **Actions**, choose
+**massed-ollama image**, then **Run workflow** on branch `main`.
 
 *Fallback if GitHub Actions is unavailable:* build on the laptop and push by hand (Docker
 Desktop running; you need a GitHub token with `write:packages`):

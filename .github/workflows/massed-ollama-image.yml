@@ -1,7 +1,7 @@
 # Builds the LQ-AI Massed Ollama image (ops/massed-ollama/) and publishes it
 # to GitHub Container Registry as ghcr.io/<your-github-name>/lq-ai-massed-ollama.
 #
-# Runs when files in ops/massed-ollama/ change on the local/massed-ollama
+# Runs when files in ops/massed-ollama/ change on the main
 # branch, or by hand from the Actions tab ("Run workflow").
 #
 # Each third-party action is pinned to an exact commit (version in the comment),
@@ -11,7 +11,7 @@ name: massed-ollama image
 
 on:
   push:
-    branches: [local/massed-ollama]
+    branches: [main]
     paths:
       - ops/massed-ollama/**
       - .github/workflows/massed-ollama-image.yml
